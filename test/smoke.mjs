@@ -1,0 +1,695 @@
+// Headless behavioural test for dsh-thinking-slider's client half.
+//
+// The real web bundle is not on disk, so this harness supplies a miniature
+// React runtime (hooks with stable per-render slots, class components, refs,
+// portals) and drives the seat the way a user does: click the trigger, drag the
+// track, press arrow keys, open the model pane.
+//
+// It also proves the stability contract: a throwing directory must degrade to
+// the boundary fallback instead of throwing out of the component, because the
+// slot renderer retires an entry whose render throws.
+//
+// Run: node test/smoke.mjs   (from the package root)
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+/** Walk up from this file until the package's client bundle is found. */
+const pluginDir = (() => {
+  let dir = here
+  for (let step = 0; step < 4; step += 1) {
+    if (fs.existsSync(path.join(dir, 'lib', 'client.js'))) return dir
+    dir = path.dirname(dir)
+  }
+  return process.cwd()
+})()
+
+const checks = []
+const check = (name, ok, extra = '') => {
+  checks.push({ name, ok })
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra !== '' ? `  (${extra})` : ''}`)
+}
+
+// ---------------------------------------------------------------------------
+// Miniature React
+// ---------------------------------------------------------------------------
+let hookSlots = []
+let hookCursor = 0
+
+/** React compares a dependency array with Object.is; absent deps always recompute. */
+const sameDeps = (previous, next) => {
+  if (previous === undefined || next === undefined) return false
+  if (previous.length !== next.length) return false
+  return previous.every((value, index) => Object.is(value, next[index]))
+}
+
+const React = {
+  Fragment: Symbol('Fragment'),
+  Component: class Component {
+    constructor(props) {
+      this.props = props
+      this.state = {}
+    }
+    setState(next) {
+      this.state = { ...this.state, ...(typeof next === 'function' ? next(this.state) : next) }
+    }
+  },
+  createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.length > 1 ? children : children[0] } }),
+  useState(initial) {
+    const at = hookCursor++
+    if (!(at in hookSlots)) hookSlots[at] = typeof initial === 'function' ? initial() : initial
+    const set = (value) => {
+      const next = typeof value === 'function' ? value(hookSlots[at]) : value
+      // React bails out of an identical state write; without that, a callback
+      // ref that re-runs on every pass would spin the harness forever.
+      if (Object.is(hookSlots[at], next)) return
+      hookSlots[at] = next
+      stateDirty = true
+    }
+    return [hookSlots[at], set]
+  },
+  useRef(initial) {
+    const at = hookCursor++
+    if (!(at in hookSlots)) hookSlots[at] = { current: initial }
+    return hookSlots[at]
+  },
+  useMemo(factory, deps) {
+    const at = hookCursor++
+    const slot = hookSlots[at]
+    if (slot === undefined || !sameDeps(slot.deps, deps)) hookSlots[at] = { value: factory(), deps }
+    return hookSlots[at].value
+  },
+  useCallback(fn, deps) {
+    const at = hookCursor++
+    const slot = hookSlots[at]
+    if (slot === undefined || !sameDeps(slot.deps, deps)) hookSlots[at] = { value: fn, deps }
+    return hookSlots[at].value
+  },
+  // Effects really run, keyed on their dependency array, with cleanup — the
+  // only way to observe "did the animation loop re-bind to the new canvas".
+  useEffect(effect, deps) {
+    const at = hookCursor++
+    const slot = effectSlots[at]
+    if (slot !== undefined && sameDeps(slot.deps, deps)) return
+    pendingEffects.push({ at, effect, deps, previous: slot })
+  },
+  useLayoutEffect() { hookCursor++ },
+  useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+  memo: (component) => component,
+}
+
+const jsx = (type, props, key) => ({ type, props: props ?? {}, key })
+const jsxs = jsx
+
+/** Effect bookkeeping: React compares deps against the previous render. */
+let effectSlots = []
+let pendingEffects = []
+/** Set when a state write must trigger another render pass. */
+let stateDirty = false
+/** Host-element identity across renders, emulating reconciliation. */
+const nodeCache = new Map()
+let liveNodes = new Set()
+/** The canvas node the particle loop most recently bound to. */
+let lastBoundCanvas = null
+
+const flushEffects = () => {
+  const queue = pendingEffects
+  pendingEffects = []
+  for (const entry of queue) {
+    entry.previous?.cleanup?.()
+    const cleanup = entry.effect()
+    effectSlots[entry.at] = { deps: entry.deps, cleanup: typeof cleanup === 'function' ? cleanup : undefined }
+  }
+}
+
+/** Unmount everything the last pass did not represent, as React would. */
+const pruneUnmounted = () => {
+  for (const [path, element] of [...nodeCache]) {
+    if (liveNodes.has(path)) continue
+    if (typeof element.ref === 'function') element.ref(null)
+    nodeCache.delete(path)
+  }
+  liveNodes = new Set()
+}
+
+// ---------------------------------------------------------------------------
+// Host globals
+// ---------------------------------------------------------------------------
+const listeners = { window: {}, document: {} }
+const addListener = (bag) => (name, fn) => { (bag[name] ??= new Set()).add(fn) }
+const removeListener = (bag) => (name, fn) => { bag[name]?.delete(fn) }
+
+globalThis.document = {
+  querySelector: () => null,
+  createElement: () => ({ dataset: {}, textContent: '', style: {}, appendChild() {} }),
+  head: { appendChild() {} },
+  body: {},
+  addEventListener: addListener(listeners.document),
+  removeEventListener: removeListener(listeners.document),
+}
+globalThis.window = {
+  __ModuleLoader__: { load: (registration) => { loadedId = registration.id; factoryRef = registration.factory } },
+  devicePixelRatio: 1,
+  innerWidth: 1280,
+  innerHeight: 800,
+  matchMedia: () => ({ matches: false }),
+  requestAnimationFrame: () => 0,
+  cancelAnimationFrame: () => {},
+  addEventListener: addListener(listeners.window),
+  removeEventListener: removeListener(listeners.window),
+}
+globalThis.matchMedia = globalThis.window.matchMedia
+globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame
+globalThis.cancelAnimationFrame = globalThis.window.cancelAnimationFrame
+globalThis.ResizeObserver = undefined
+
+let loadedId
+let factoryRef
+
+const require_ = (id) => {
+  if (id === 'react') return React
+  if (id === 'react/jsx-runtime') return { jsx, jsxs }
+  if (id === 'react-dom') return { createPortal: (children) => children }
+  throw new Error(`unexpected require(${id})`)
+}
+
+new Function('window', 'document', fs.readFileSync(path.join(pluginDir, 'lib', 'client.js'), 'utf8'))(globalThis.window, globalThis.document)
+const mod = factoryRef(require_)
+
+check('loader id', loadedId === 'dsh-thinking-slider', String(loadedId))
+check('exports apply + inject', typeof mod.apply === 'function' && Array.isArray(mod.inject), (mod.inject ?? []).join(','))
+// Proven against real cordis by _tools/cordis-inject-proof.mjs: ctx.modelDirectories
+// is a traceable proxy whose `.ctx` is rebound to THIS plugin, and directoryFor()
+// reads `this.ctx.remote.session` through it.
+check('declares the remote.session service the model directory reaches through us',
+  mod.inject.includes('remote') && mod.inject.includes('remote.session'),
+  mod.inject.join(', '))
+
+// ---------------------------------------------------------------------------
+// Fake composition
+// ---------------------------------------------------------------------------
+const registrations = []
+const entryErrorListeners = new Set()
+/** Priorities already claimed by earlier generations (a leaked registration). */
+const claimed = new Set()
+let duplicateStrikes = 0
+
+const slots = {
+  inject(key, callback) {
+    check('registers into the composer model seat', key === 'conversation.input.model', key)
+    return callback()
+  },
+  register(options, component) {
+    // Mirror SlotCore: a `single` slot refuses a second entry at a taken priority.
+    if (claimed.has(options.priority)) {
+      duplicateStrikes += 1
+      throw new Error(`single slot "${options.name}" already has a registration at priority ${options.priority} — register at a different priority to shadow it (lowest renders)`)
+    }
+    claimed.add(options.priority)
+    const registration = { options, component }
+    registrations.push(registration)
+    return () => { claimed.delete(options.priority) }
+  },
+  onEntryError(fn) {
+    entryErrorListeners.add(fn)
+    return () => entryErrorListeners.delete(fn)
+  },
+}
+
+const catalogue = [
+  {
+    id: 'tokenrhythm',
+    name: 'tokenrhythm',
+    models: [
+      {
+        id: 'glm-5.3',
+        name: 'glm-5.3',
+        reasoning: {
+          efforts: [
+            { id: 'off', name: 'Off' },
+            { id: 'low', name: 'Low' },
+            { id: 'high', name: 'High' },
+            { id: 'max', name: 'Max' },
+          ],
+        },
+      },
+      { id: 'plain-model', name: 'plain-model' },
+    ],
+  },
+  { id: 'teds', name: 'teds', models: [{ id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }] },
+]
+
+const snapshot = {
+  status: 'ready',
+  error: null,
+  groups: catalogue,
+  failures: [],
+  current: { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' },
+  pending: null,
+  retainedEffort: undefined,
+}
+
+const calls = []
+const directory = {
+  store: { subscribe: () => () => {}, getSnapshot: () => snapshot },
+  load: async () => ({ groups: catalogue }),
+  select: async (selection) => { calls.push(selection); return { ok: true } },
+}
+
+/** The plugin's own derived scope, so a hot reload can be replayed. */
+const makeScope = () => ({
+  slots,
+  sessions: { subagentAddress: () => undefined },
+  modelDirectories: { directoryFor: () => directory },
+  effect(fn) {
+    return fn()
+  },
+})
+
+let teardown = null
+const loadPlugin = () => {
+  teardown = null
+  mod.apply({
+    inject: (_deps, callback) => { teardown = callback(makeScope()) },
+  })
+}
+
+loadPlugin()
+
+check('registers exactly one entry', registrations.length === 1, String(registrations.length))
+const reg = registrations[0]
+check('shadows at priority -1', reg.options.priority === -1, String(reg.options.priority))
+
+const face = reg.options.inject('session-1')
+check('inject face shape', ['available', 'directory', 'load', 'select'].every((k) => k in face), Object.keys(face).join(','))
+
+// ---------------------------------------------------------------------------
+// Render harness
+// ---------------------------------------------------------------------------
+const TRACK_RECT = { left: 100, top: 400, right: 420, bottom: 430, width: 320, height: 30 }
+/** Errors a class boundary absorbed during the current render pass. */
+const boundaryCatches = []
+/** Class instances survive across renders, as React's do. */
+const classInstances = new Map()
+const elementOf = (type, props, path) => {
+  let element = nodeCache.get(path)
+  if (element === undefined || element.type !== type) {
+    element = { type, path, bound: 0, clears: 0 }
+    element.getBoundingClientRect = () => (String(element.props?.className ?? '').includes('tsl-trackWrap') ? TRACK_RECT : { left: 0, top: 0, right: 320, bottom: 600, width: 320, height: 600 })
+    if (type === 'canvas') {
+      // Observable proof that the animation loop bound to THIS node.
+      element.getContext = () => {
+        if (element.context === undefined) {
+          element.context = {
+            setTransform() {}, clearRect() { element.clears += 1 }, beginPath() {}, arc() {},
+            fill() {}, moveTo() {}, lineTo() {}, stroke() {},
+          }
+        }
+        element.bound += 1
+        lastBoundCanvas = element
+        return element.context
+      }
+      element.width = 0
+      element.height = 0
+    }
+    nodeCache.set(path, element)
+  }
+  element.props = props
+  element.ref = props.ref
+  liveNodes.add(path)
+  if (props.ref !== null && typeof props.ref === 'object') props.ref.current = element
+  else if (typeof props.ref === 'function') props.ref(element)
+  return element
+}
+
+const expand = (node, path = 'r') => {
+  if (node === null || node === undefined || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map((child, index) => expand(child, `${path}.${index}`))
+  const { type, props = {} } = node
+  if (type === undefined) return node
+  if (typeof type === 'function') {
+    if (typeof type.prototype?.render === 'function') {
+      // React keeps a class instance alive across renders at the same position;
+      // state (crucially an error boundary's) must survive, or a retry cannot be
+      // distinguished from a fresh mount.
+      let instance = classInstances.get(type)
+      if (instance === undefined) {
+        instance = new type(props)
+        classInstances.set(type, instance)
+      }
+      instance.props = props
+      if (instance.state === undefined) instance.state = {}
+      try {
+        const rendered = expand(instance.render(), `${path}:${type.name}`)
+        instance.componentDidUpdate?.()
+        return rendered
+      } catch (error) {
+        if (typeof type.getDerivedStateFromError !== 'function') throw error
+        boundaryCatches.push(error)
+        instance.state = { ...instance.state, ...type.getDerivedStateFromError(error) }
+        const fallback = expand(instance.render(), `${path}:${type.name}`)
+        instance.componentDidCatch?.(error, { componentStack: '' })
+        return fallback
+      }
+    }
+    return expand(type(props), path)
+  }
+  if (type === React.Fragment) return expand(props.children, path)
+  return elementOf(type, { ...props, children: expand(props.children, `${path}/${String(type)}`) }, path)
+}
+
+/**
+ * One render pass, repeated while a commit-phase state write (a callback ref)
+ * asks for another — that is how React reacts to `ref={setNode}`.
+ */
+const renderSeat = (props = {}) => {
+  let tree = null
+  for (let pass = 0; pass < 8; pass += 1) {
+    hookCursor = 0
+    stateDirty = false
+    tree = expand(reg.component({ ...face, locked: false, ...props }))
+    flushEffects()
+    pruneUnmounted()
+    if (!stateDirty) break
+  }
+  return tree
+}
+
+const collect = (node, out = []) => {
+  if (node === null || node === undefined || typeof node === 'boolean') return out
+  if (Array.isArray(node)) { for (const child of node) collect(child, out); return out }
+  if (typeof node === 'object' && node.props !== undefined) {
+    out.push(node)
+    collect(node.props.children, out)
+  }
+  return out
+}
+
+const byClass = (nodes, className) =>
+  nodes.filter((n) => String(n.props?.className ?? '').split(' ').includes(className))
+
+/**
+ * Guard the jsx(el, props, key) call shape: passing a children array as the
+ * third argument silently renders nothing in React (it lands in `key`).
+ */
+const misArityLeaf = (nodes) => nodes.filter((n) => n.key !== undefined && typeof n.key !== 'string' && typeof n.key !== 'number')
+
+const textOf = (node) => {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (typeof node === 'object' && node.props !== undefined) return textOf(node.props.children)
+  return ''
+}
+
+// --- closed state -----------------------------------------------------------
+let view = collect(renderSeat())
+let trigger = byClass(view, 'tsl-trigger')[0]
+check('renders the composer trigger', trigger !== undefined)
+check('trigger reads "model · level"', textOf(trigger).includes('glm-5.3') && textOf(trigger).includes('High'), JSON.stringify(textOf(trigger)))
+check('trigger is enabled', trigger?.props.disabled === false)
+check('no slider rail while closed', byClass(view, 'tsl-trackWrap').length === 0)
+
+// --- open the card ----------------------------------------------------------
+trigger.props.onClick()
+view = collect(renderSeat())
+const card = byClass(view, 'tsl-card')[0]
+check('clicking the trigger opens the card', card !== undefined)
+check('card is a labelled dialog', card?.props.role === 'dialog')
+check('card headline is the level name', byClass(view, 'tsl-level')[0] !== undefined && textOf(byClass(view, 'tsl-level')[0]) === 'High', textOf(byClass(view, 'tsl-level')[0]))
+check('card shows the model row', textOf(byClass(view, 'tsl-modelRow')[0]) === 'glm-5.3', textOf(byClass(view, 'tsl-modelRow')[0]))
+
+const rail = byClass(view, 'tsl-trackWrap')[0]
+check('slider exposes a11y state', rail?.props.role === 'slider' && rail?.props['aria-valuemax'] === 3 && rail?.props['aria-valuenow'] === 2,
+  `role=${rail?.props.role} max=${rail?.props['aria-valuemax']} now=${rail?.props['aria-valuenow']}`)
+check('one tick per level', byClass(view, 'tsl-tick').length === 4, String(byClass(view, 'tsl-tick').length))
+check('one scale label per level', byClass(view, 'tsl-scaleItem').length === 4)
+check('particle canvas is mounted', byClass(view, 'tsl-canvas').length === 1)
+
+const fill = byClass(view, 'tsl-fill')[0]
+check('fill gradient is emitted', typeof fill?.props.style?.background === 'string' && fill.props.style.background.startsWith('linear-gradient'), fill?.props.style?.background)
+check('fill ends exactly under the knob centre (single geometry)',
+  fill?.props.style?.width === byClass(view, 'tsl-thumb')[0]?.props.style?.left,
+  `fill=${fill?.props.style?.width} thumb=${byClass(view, 'tsl-thumb')[0]?.props.style?.left}`)
+check('the active tick sits under the knob (shared geometry)',
+  byClass(view, 'tsl-tick')[2]?.props.style?.left === byClass(view, 'tsl-thumb')[0]?.props.style?.left,
+  `tick[2]=${byClass(view, 'tsl-tick')[2]?.props.style?.left} thumb=${byClass(view, 'tsl-thumb')[0]?.props.style?.left}`)
+const highGradient = fill?.props.style?.background
+
+// --- drag to the far right --------------------------------------------------
+rail.props.onPointerDown({ preventDefault() {}, currentTarget: { setPointerCapture() {} }, clientX: 419, pointerId: 1 })
+rail.props.onPointerUp({ clientX: 419 })
+await new Promise((resolve) => setTimeout(resolve, 0))
+check('dragging to the end commits Max', calls.at(-1)?.reasoningEffort === 'max', JSON.stringify(calls.at(-1) ?? null))
+
+// --- keyboard ---------------------------------------------------------------
+calls.length = 0
+rail.props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+await new Promise((resolve) => setTimeout(resolve, 0))
+check('ArrowLeft commits the previous level', calls.at(-1)?.reasoningEffort === 'low', JSON.stringify(calls.at(-1) ?? null))
+
+// --- gradient climbs with the level ----------------------------------------
+snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'max' }
+let maxView = collect(renderSeat())
+const maxGradient = byClass(maxView, 'tsl-fill')[0]?.props.style?.background
+snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'off' }
+let offView = collect(renderSeat())
+const offFill = byClass(offView, 'tsl-fill')[0]
+check('max gradient differs from high gradient', maxGradient !== highGradient, `${highGradient} vs ${maxGradient}`)
+check('off rail is dimmed rather than glowing', offFill?.props.style?.opacity === 0.45, String(offFill?.props.style?.opacity))
+check('off knob still sits flush at the left cap', offFill?.props.style?.width === byClass(offView, 'tsl-thumb')[0]?.props.style?.left,
+  `fill=${offFill?.props.style?.width} thumb=${byClass(offView, 'tsl-thumb')[0]?.props.style?.left}`)
+const maxFill = byClass(maxView, 'tsl-fill')[0]
+check('max knob sits flush at the right cap', maxFill?.props.style?.width === byClass(maxView, 'tsl-thumb')[0]?.props.style?.left,
+  `fill=${maxFill?.props.style?.width} thumb=${byClass(maxView, 'tsl-thumb')[0]?.props.style?.left}`)
+
+// --- model pane -------------------------------------------------------------
+snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+view = collect(renderSeat())
+byClass(view, 'tsl-modelRow')[0].props.onClick()
+view = collect(renderSeat())
+const items = byClass(view, 'tsl-item')
+check('model pane lists every selectable model', items.length === 3, String(items.length))
+check('model pane groups by provider', byClass(view, 'tsl-group').length === 2, String(byClass(view, 'tsl-group').length))
+check('a reasoning model shows one ramp dot per level', byClass(view, 'tsl-rampDot').length === 5, String(byClass(view, 'tsl-rampDot').length))
+check('the ramp lists the level names in its tooltip', String(items[0]?.props?.title ?? '').includes('Off') && String(items[0]?.props?.title ?? '').includes('Max'), String(items[0]?.props?.title))
+check('a model with no levels shows no ramp dots', byClass(view, 'tsl-ramp').length === 2, String(byClass(view, 'tsl-ramp').length))
+check('a model with no levels shows a muted dash instead', byClass(view, 'tsl-rampNone').length === 1, String(byClass(view, 'tsl-rampNone').length))
+check('no element was passed a children array as its key', misArityLeaf(view).length === 0,
+  misArityLeaf(view).map((n) => n.type).join(', ') || 'none')
+
+calls.length = 0
+items[2].props.onClick()
+await new Promise((resolve) => setTimeout(resolve, 0))
+check('picking a model selects that provider/model', calls.at(-1)?.provider === 'teds' && calls.at(-1)?.model === 'deepseek-v4-pro', JSON.stringify(calls.at(-1) ?? null))
+check('picking a model carries its default level', 'reasoningEffort' in (calls.at(-1) ?? {}) === false, JSON.stringify(calls.at(-1) ?? null))
+
+// --- a model with no reasoning levels ---------------------------------------
+snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
+const plain = collect(renderSeat())
+check('no-effort model renders no rail after opening', byClass(plain, 'tsl-trackWrap').length === 0)
+const plainTrigger = byClass(plain, 'tsl-trigger')[0]
+check('no-effort trigger omits the level segment', !textOf(plainTrigger).includes('·'), JSON.stringify(textOf(plainTrigger)))
+
+// --- stability: a throwing directory must not escape the component ----------
+snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+const originalGroups = snapshot.groups
+snapshot.groups = null
+let threw = null
+let fallbackView = null
+try {
+  fallbackView = collect(renderSeat())
+} catch (error) {
+  threw = error
+}
+check('a broken snapshot does not throw out of the seat', threw === null, threw === null ? '' : String(threw))
+snapshot.groups = originalGroups
+
+// A directory whose getSnapshot throws is caught by the boundary.
+const explodingDirectory = { store: { subscribe: () => () => {}, getSnapshot: () => { throw new Error('boom') } }, load: async () => {}, select: async () => ({ ok: true }) }
+const explodingFace = { available: true, directory: explodingDirectory.store, load: () => {}, select: explodingDirectory.select }
+let boundaryError = null
+let boundaryView = null
+boundaryCatches.length = 0
+const originalError = console.error
+console.error = () => {}
+try {
+  boundaryView = collect(renderSeat(explodingFace))
+} catch (error) {
+  boundaryError = error
+} finally {
+  console.error = originalError
+}
+check('a throwing directory is caught by the seat boundary', boundaryError === null, boundaryError === null ? '' : String(boundaryError))
+check('the boundary actually absorbed the crash', boundaryCatches.length === 1, String(boundaryCatches.length))
+check('the boundary renders a fallback instead of nothing', byClass(boundaryView ?? [], 'tsl-fallback').length === 1)
+
+// The failure the user actually hit: a TRANSIENT render error must not park the
+// fallback in the composer forever.
+{
+  let failNext = true
+  const flakyDirectory = {
+    store: {
+      subscribe: () => () => {},
+      getSnapshot: () => {
+        if (failNext) { failNext = false; throw new Error('catalog reloading') }
+        return snapshot
+      },
+    },
+    load: async () => ({ groups: catalogue }),
+    select: async () => ({ ok: true }),
+  }
+  const flakyFace = { available: true, directory: flakyDirectory.store, load: () => {}, select: flakyDirectory.select }
+  const quiet = console.error
+  console.error = () => {}
+  classInstances.clear()                        // isolate this scenario
+  boundaryCatches.length = 0
+  const first = collect(renderSeat(flakyFace))
+  check('a transient failure shows the fallback', byClass(first, 'tsl-fallback').length === 1)
+
+  const retry = byClass(first, 'tsl-fallbackRetry')[0]
+  check('the fallback offers a 重试 control', retry !== undefined)
+  check('the fallback is not a dead end (it keeps an auto-retry timer)',
+    [...classInstances.values()].some((instance) => instance.timer !== null && instance.timer !== undefined))
+  retry?.props.onClick()
+  const second = collect(renderSeat(flakyFace))
+  console.error = quiet
+
+  check('the seat recovers after a retry (boundary is not sticky)', byClass(second, 'tsl-fallback').length === 0,
+    `fallback=${byClass(second, 'tsl-fallback').length}`)
+  check('the recovered seat renders the trigger again', byClass(second, 'tsl-trigger').length === 1)
+}
+
+check('a seat-render crash is published to the diagnostic channel', (() => {
+  const diagnostics = globalThis.__dshThinkingSlider?.diagnostics ?? []
+  return diagnostics.some((entry) => entry.phase === 'seat-render')
+})(), (globalThis.__dshThinkingSlider?.diagnostics ?? []).map((d) => d.phase).join(','))
+
+// ---------------------------------------------------------------------------
+// Stability: the failures that made the seat vanish in the real app
+// ---------------------------------------------------------------------------
+check('a hot reload disposes the previous registration', (() => {
+  const before = registrations.length
+  teardown?.()
+  loadPlugin()
+  return registrations.length === before + 1
+})(), `registrations=${registrations.length}, duplicate strikes=${duplicateStrikes}`)
+
+// A predecessor that never ran its disposer (the real leak) must not be fatal.
+check('a leaked registration is stepped over, not fatal', (() => {
+  const before = registrations.length
+  loadPlugin()                       // no teardown: simulates the leaked generation
+  const latest = registrations.at(-1)
+  return registrations.length === before + 1 && duplicateStrikes >= 1 && latest.options.priority < -1
+})(), `priority=${registrations.at(-1)?.options.priority}, duplicate strikes=${duplicateStrikes}`)
+
+// The newest generation must still be the one rendered (lowest priority wins).
+check('the newest generation holds the lowest priority', (() => {
+  const priorities = registrations.map((r) => r.options.priority)
+  return priorities.at(-1) === Math.min(...priorities)
+})(), registrations.map((r) => r.options.priority).join(' > '))
+
+// A throwing directory must degrade, never retire the entry.
+check('a throwing directory degrades the face instead of throwing', (() => {
+  const exploding = {
+    inject: (_deps, callback) => callback({
+      slots,
+      sessions: { subagentAddress: () => undefined },
+      modelDirectories: { directoryFor: () => { throw new Error('session resolved no scope') } },
+      effect: (fn) => fn(),
+    }),
+  }
+  const errors = registrations.length
+  mod.apply(exploding)
+  const newest = registrations.at(-1)
+  let face = null
+  try {
+    face = newest.options.inject('session-x')
+  } catch {
+    return false
+  }
+  void errors
+  return face !== null && face.available === false && typeof face.select === 'function'
+})())
+
+// An abdicated entry must be put back so the seat returns by itself.
+// Isolate one live generation so the assertion is exact.
+entryErrorListeners.clear()
+loadPlugin()
+check('an abdicated seat re-registers itself', (() => {
+  const before = registrations.length
+  for (const listener of entryErrorListeners) {
+    listener('conversation.input.model', registrations.at(-1), new Error('render blew up'), { abdicated: true })
+  }
+  return registrations.length === before + 1
+})(), `registrations=${registrations.length}, listeners=${entryErrorListeners.size}`)
+
+check('an abdication of a different seat is ignored', (() => {
+  const before = registrations.length
+  for (const listener of entryErrorListeners) {
+    listener('some.other.slot', registrations.at(-1), new Error('x'), { abdicated: true })
+  }
+  return registrations.length === before
+})())
+
+// The particle loop is bound to a canvas ELEMENT. Switching to the model pane
+// unmounts that canvas and returning mounts a new one, so the loop must re-bind
+// — otherwise the rail stays blank until the card is closed and reopened.
+{
+  snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+  classInstances.clear()
+  nodeCache.clear()
+  liveNodes = new Set()
+  hookSlots = []
+  effectSlots = []
+  pendingEffects = []
+
+  let view = collect(renderSeat())
+  byClass(view, 'tsl-trigger')[0].props.onClick()
+  view = collect(renderSeat())
+  const firstCanvas = byClass(view, 'tsl-canvas')[0]
+  check('opening the card binds the particle loop to the canvas', lastBoundCanvas === firstCanvas && firstCanvas?.bound >= 1,
+    `bound=${String(firstCanvas?.bound)}`)
+
+  // Walk into the model pane: the canvas unmounts.
+  byClass(view, 'tsl-modelRow')[0].props.onClick()
+  view = collect(renderSeat())
+  check('the model pane unmounts the canvas and stops its loop',
+    byClass(view, 'tsl-canvas').length === 0 && firstCanvas.clears >= 1,
+    `clears=${String(firstCanvas.clears)}`)
+
+  // Pick a model: the effort pane returns with a BRAND-NEW canvas.
+  byClass(view, 'tsl-item')[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  view = collect(renderSeat())
+  const secondCanvas = byClass(view, 'tsl-canvas')[0]
+  check('returning from the model pane mounts a different canvas', secondCanvas !== undefined && secondCanvas !== firstCanvas)
+  check('the particle loop re-binds to the new canvas (no close/reopen needed)',
+    lastBoundCanvas === secondCanvas && secondCanvas?.bound >= 1,
+    `bound to first=${String(lastBoundCanvas === firstCanvas)}, new=${String(lastBoundCanvas === secondCanvas)}`)
+}
+
+check('a non-abdicating crash report does not churn the seat', (() => {
+  const before = registrations.length
+  for (const listener of entryErrorListeners) {
+    listener('conversation.input.model', registrations.at(-1), new Error('chain declined'), { abdicated: false })
+  }
+  return registrations.length === before
+})())
+
+check('diagnostics are published for DevTools', Array.isArray(globalThis.__dshThinkingSlider?.diagnostics) && globalThis.__dshThinkingSlider.diagnostics.length >= 1,
+  String(globalThis.__dshThinkingSlider?.diagnostics?.length ?? 0))
+
+check('apply never throws even on a broken composition', (() => {
+  try {
+    mod.apply({ inject: () => { throw new Error('no services at all') } })
+    return true
+  } catch {
+    return false
+  }
+})())
+
+const failed = checks.filter((c) => !c.ok)
+console.log(failed.length === 0 ? `\nALL ${checks.length} CHECKS PASSED` : `\n${failed.length}/${checks.length} CHECK(S) FAILED`)
+process.exit(failed.length === 0 ? 0 : 1)

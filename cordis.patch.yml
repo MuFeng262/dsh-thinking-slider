@@ -1,0 +1,8 @@
+# dsh-thinking-slider
+#
+# Host half is intentionally empty: this plugin is pure browser UI. The `insert`
+# row below is what makes the composition load `./client` (declared through
+# package.json's `dsh.client`) into the web app.
+- insert:
+    - id: thinking-slider
+      name: 'dsh-thinking-slider'

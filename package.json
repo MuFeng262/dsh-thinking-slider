@@ -1,0 +1,48 @@
+{
+  "name": "dsh-thinking-slider",
+  "version": "0.1.0",
+  "description": "Codex-style reasoning-effort slider for the DeepSeek Harness composer: pick a model, then drag its thinking level on a gradient particle rail.",
+  "type": "module",
+  "license": "MIT",
+  "author": "MuFeng262",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "reasoning-effort",
+    "thinking-level",
+    "ui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MuFeng262/dsh-thinking-slider.git"
+  },
+  "homepage": "https://github.com/MuFeng262/dsh-thinking-slider#readme",
+  "bugs": {
+    "url": "https://github.com/MuFeng262/dsh-thinking-slider/issues"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}
