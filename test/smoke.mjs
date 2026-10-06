@@ -86,7 +86,7 @@ const React = {
     if (slot === undefined || !sameDeps(slot.deps, deps)) hookSlots[at] = { value: fn, deps }
     return hookSlots[at].value
   },
-  // Effects really run, keyed on their dependency array, with cleanup — the
+  // Effects really run, keyed on their dependency array, with cleanup 鈥?the
   // only way to observe "did the animation loop re-bind to the new canvas".
   useEffect(effect, deps) {
     const at = hookCursor++
@@ -163,6 +163,14 @@ globalThis.matchMedia = globalThis.window.matchMedia
 globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame
 globalThis.cancelAnimationFrame = globalThis.window.cancelAnimationFrame
 globalThis.ResizeObserver = undefined
+/** The plugin persists its mode client-locally; give it a real store to hit. */
+const storage = new Map()
+globalThis.localStorage = {
+  getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+  setItem: (key, value) => { storage.set(key, String(value)) },
+  removeItem: (key) => { storage.delete(key) },
+  clear: () => { storage.clear() },
+}
 
 let loadedId
 let factoryRef
@@ -194,28 +202,40 @@ const entryErrorListeners = new Set()
 /** Priorities already claimed by earlier generations (a leaked registration). */
 const claimed = new Set()
 let duplicateStrikes = 0
+/** Keys the plugin asked the slot registry to wait for. */
+const injectedKeys = []
+
+/** Cell key per SlotCore: single cells by priority, list cells by id. */
+const cellOf = (options) =>
+  options.name === 'conversation.input.model' ? `p:${String(options.priority)}` : `id:${String(options.id)}`
 
 const slots = {
   inject(key, callback) {
-    check('registers into the composer model seat', key === 'conversation.input.model', key)
+    injectedKeys.push(key)
     return callback()
   },
   register(options, component) {
-    // Mirror SlotCore: a `single` slot refuses a second entry at a taken priority.
-    if (claimed.has(options.priority)) {
+    // Mirror SlotCore: `single` refuses a taken priority, `list` a taken id.
+    const cell = cellOf(options)
+    if (claimed.has(cell)) {
       duplicateStrikes += 1
-      throw new Error(`single slot "${options.name}" already has a registration at priority ${options.priority} — register at a different priority to shadow it (lowest renders)`)
+      throw new Error(`single slot "${options.name}" already has a registration at priority ${String(options.priority)} 鈥?register at a different priority to shadow it (lowest renders)`)
     }
-    claimed.add(options.priority)
+    claimed.add(cell)
     const registration = { options, component }
     registrations.push(registration)
-    return () => { claimed.delete(options.priority) }
+    return () => { claimed.delete(cell) }
   },
   onEntryError(fn) {
     entryErrorListeners.add(fn)
     return () => entryErrorListeners.delete(fn)
   },
 }
+
+/** Registrations of one slot name, in registration order. */
+const regsOf = (name) => registrations.filter((entry) => entry.options.name === name)
+const seatRegs = () => regsOf('conversation.input.model')
+const rowRegs = () => regsOf('settings.general.item')
 
 const catalogue = [
   {
@@ -271,14 +291,20 @@ let teardown = null
 const loadPlugin = () => {
   teardown = null
   mod.apply({
+    // `slots` sits on the plugin context; `inject` hands back the derived scope.
+    slots,
     inject: (_deps, callback) => { teardown = callback(makeScope()) },
   })
 }
 
 loadPlugin()
 
-check('registers exactly one entry', registrations.length === 1, String(registrations.length))
-const reg = registrations[0]
+check('waits for the composer seat and the General settings row',
+  injectedKeys.includes('conversation.input.model') && injectedKeys.includes('settings.general.item'),
+  injectedKeys.join(', '))
+check('registers exactly one seat', seatRegs().length === 1, String(seatRegs().length))
+check('registers exactly one settings row', rowRegs().length === 1, String(rowRegs().length))
+const reg = seatRegs()[0]
 check('shadows at priority -1', reg.options.priority === -1, String(reg.options.priority))
 
 const face = reg.options.inject('session-1')
@@ -361,7 +387,7 @@ const expand = (node, path = 'r') => {
 
 /**
  * One render pass, repeated while a commit-phase state write (a callback ref)
- * asks for another — that is how React reacts to `ref={setNode}`.
+ * asks for another 鈥?that is how React reacts to `ref={setNode}`.
  */
 const renderSeat = (props = {}) => {
   let tree = null
@@ -407,7 +433,7 @@ const textOf = (node) => {
 let view = collect(renderSeat())
 let trigger = byClass(view, 'tsl-trigger')[0]
 check('renders the composer trigger', trigger !== undefined)
-check('trigger reads "model · level"', textOf(trigger).includes('glm-5.3') && textOf(trigger).includes('High'), JSON.stringify(textOf(trigger)))
+check('trigger reads "model 路 level"', textOf(trigger).includes('glm-5.3') && textOf(trigger).includes('High'), JSON.stringify(textOf(trigger)))
 check('trigger is enabled', trigger?.props.disabled === false)
 check('no slider rail while closed', byClass(view, 'tsl-trackWrap').length === 0)
 
@@ -490,7 +516,7 @@ snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
 const plain = collect(renderSeat())
 check('no-effort model renders no rail after opening', byClass(plain, 'tsl-trackWrap').length === 0)
 const plainTrigger = byClass(plain, 'tsl-trigger')[0]
-check('no-effort trigger omits the level segment', !textOf(plainTrigger).includes('·'), JSON.stringify(textOf(plainTrigger)))
+check('no-effort trigger omits the level segment', !textOf(plainTrigger).includes('路'), JSON.stringify(textOf(plainTrigger)))
 
 // --- stability: a throwing directory must not escape the component ----------
 snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
@@ -525,6 +551,73 @@ check('a throwing directory is caught by the seat boundary', boundaryError === n
 check('the boundary actually absorbed the crash', boundaryCatches.length === 1, String(boundaryCatches.length))
 check('the boundary renders a fallback instead of nothing', byClass(boundaryView ?? [], 'tsl-fallback').length === 1)
 
+// ---------------------------------------------------------------------------
+// Rail modes: official hands the composer back, energy binds its own renderer
+// ---------------------------------------------------------------------------
+{
+  const row = rowRegs()[0]
+  const modeView = collect(expand(row.component({})))
+  const choices = byClass(modeView, 'tsl-segChoice')
+  check('the settings row offers every mode', choices.length === 3, String(choices.length))
+  check('the settings row marks the active mode',
+    choices.filter((c) => c.props['data-active'] === true).length === 1)
+  check('the settings row defaults to particle',
+    textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
+
+  // Switching to 官方 must give the composer back to the shipped selector.
+  const claimedBefore = claimed.has('p:-1')
+  choices.find((c) => textOf(c) === '官方').props.onClick()
+  check('choosing 官方 releases the composer seat', seatRegs().at(-1) !== undefined && !claimed.has('p:-1'),
+    `claimed -1 before=${String(claimedBefore)} after=${String(claimed.has('p:-1'))}`)
+  check('choosing 官方 persists the mode', storage.get('dsh-thinking-slider:mode') === 'official',
+    String(storage.get('dsh-thinking-slider:mode')))
+
+  // And switching back must reclaim it. Asserted as "a registration happened
+  // and the shadowing priority is held again": earlier tests leave leaked
+  // generations subscribed, so an exact count is not meaningful here.
+  const seatsBefore = seatRegs().length
+  choices.find((c) => textOf(c) === '粒子').props.onClick()
+  check('switching back reclaims the composer seat',
+    seatRegs().length > seatsBefore && claimed.has('p:-1'),
+    `before=${seatsBefore} after=${seatRegs().length} holds -1=${String(claimed.has('p:-1'))}`)
+}
+
+// The energy rail must actually bind to the freshly mounted canvas.
+{
+  snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+  classInstances.clear()
+  nodeCache.clear()
+  liveNodes = new Set()
+  hookSlots = []
+  effectSlots = []
+  pendingEffects = []
+  lastBoundCanvas = null
+
+  storage.set('dsh-thinking-slider:mode', 'energy')
+  // The module reads its mode once; drive the store through the settings row.
+  const row = rowRegs().at(-1)
+  const modeView = collect(expand(row.component({})))
+  byClass(modeView, 'tsl-segChoice').find((c) => textOf(c) === '能量充能').props.onClick()
+
+  let view = collect(renderSeat())
+  byClass(view, 'tsl-trigger')[0].props.onClick()
+  view = collect(renderSeat())
+  const canvas = byClass(view, 'tsl-canvas')[0]
+  check('energy mode binds its renderer to the rail canvas', canvas !== undefined && lastBoundCanvas === canvas,
+    `bound=${String(canvas?.bound)}`)
+
+  // A commit must hand the renderer a burst request it consumes.
+  calls.length = 0
+  const rail = byClass(view, 'tsl-trackWrap')[0]
+  rail.props.onPointerDown({ preventDefault() {}, currentTarget: { setPointerCapture() {} }, clientX: 419, pointerId: 1 })
+  rail.props.onPointerUp({ clientX: 419 })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  check('a commit commits the level in energy mode', calls.at(-1)?.reasoningEffort === 'max', JSON.stringify(calls.at(-1) ?? null))
+
+  // Back to particle for the remaining checks.
+  byClass(collect(expand(row.component({}))), 'tsl-segChoice').find((c) => textOf(c) === '粒子').props.onClick()
+}
+
 // The failure the user actually hit: a TRANSIENT render error must not park the
 // fallback in the composer forever.
 {
@@ -549,7 +642,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   check('a transient failure shows the fallback', byClass(first, 'tsl-fallback').length === 1)
 
   const retry = byClass(first, 'tsl-fallbackRetry')[0]
-  check('the fallback offers a 重试 control', retry !== undefined)
+  check('the fallback offers a 閲嶈瘯 control', retry !== undefined)
   check('the fallback is not a dead end (it keeps an auto-retry timer)',
     [...classInstances.values()].some((instance) => instance.timer !== null && instance.timer !== undefined))
   retry?.props.onClick()
@@ -570,25 +663,25 @@ check('a seat-render crash is published to the diagnostic channel', (() => {
 // Stability: the failures that made the seat vanish in the real app
 // ---------------------------------------------------------------------------
 check('a hot reload disposes the previous registration', (() => {
-  const before = registrations.length
+  const before = seatRegs().length
   teardown?.()
   loadPlugin()
-  return registrations.length === before + 1
-})(), `registrations=${registrations.length}, duplicate strikes=${duplicateStrikes}`)
+  return seatRegs().length === before + 1
+})(), `registrations=${seatRegs().length}, duplicate strikes=${duplicateStrikes}`)
 
 // A predecessor that never ran its disposer (the real leak) must not be fatal.
 check('a leaked registration is stepped over, not fatal', (() => {
-  const before = registrations.length
+  const before = seatRegs().length
   loadPlugin()                       // no teardown: simulates the leaked generation
-  const latest = registrations.at(-1)
-  return registrations.length === before + 1 && duplicateStrikes >= 1 && latest.options.priority < -1
-})(), `priority=${registrations.at(-1)?.options.priority}, duplicate strikes=${duplicateStrikes}`)
+  const latest = seatRegs().at(-1)
+  return seatRegs().length === before + 1 && duplicateStrikes >= 1 && latest.options.priority < -1
+})(), `priority=${seatRegs().at(-1)?.options.priority}, duplicate strikes=${duplicateStrikes}`)
 
 // The newest generation must still be the one rendered (lowest priority wins).
 check('the newest generation holds the lowest priority', (() => {
-  const priorities = registrations.map((r) => r.options.priority)
+  const priorities = seatRegs().map((r) => r.options.priority)
   return priorities.at(-1) === Math.min(...priorities)
-})(), registrations.map((r) => r.options.priority).join(' > '))
+})(), seatRegs().map((r) => r.options.priority).join(' > '))
 
 // A throwing directory must degrade, never retire the entry.
 check('a throwing directory degrades the face instead of throwing', (() => {
@@ -600,9 +693,9 @@ check('a throwing directory degrades the face instead of throwing', (() => {
       effect: (fn) => fn(),
     }),
   }
-  const errors = registrations.length
+  const errors = seatRegs().length
   mod.apply(exploding)
-  const newest = registrations.at(-1)
+  const newest = seatRegs().at(-1)
   let face = null
   try {
     face = newest.options.inject('session-x')
@@ -618,24 +711,24 @@ check('a throwing directory degrades the face instead of throwing', (() => {
 entryErrorListeners.clear()
 loadPlugin()
 check('an abdicated seat re-registers itself', (() => {
-  const before = registrations.length
+  const before = seatRegs().length
   for (const listener of entryErrorListeners) {
-    listener('conversation.input.model', registrations.at(-1), new Error('render blew up'), { abdicated: true })
+    listener('conversation.input.model', seatRegs().at(-1), new Error('render blew up'), { abdicated: true })
   }
-  return registrations.length === before + 1
-})(), `registrations=${registrations.length}, listeners=${entryErrorListeners.size}`)
+  return seatRegs().length === before + 1
+})(), `registrations=${seatRegs().length}, listeners=${entryErrorListeners.size}`)
 
 check('an abdication of a different seat is ignored', (() => {
-  const before = registrations.length
+  const before = seatRegs().length
   for (const listener of entryErrorListeners) {
-    listener('some.other.slot', registrations.at(-1), new Error('x'), { abdicated: true })
+    listener('some.other.slot', seatRegs().at(-1), new Error('x'), { abdicated: true })
   }
-  return registrations.length === before
+  return seatRegs().length === before
 })())
 
 // The particle loop is bound to a canvas ELEMENT. Switching to the model pane
 // unmounts that canvas and returning mounts a new one, so the loop must re-bind
-// — otherwise the rail stays blank until the card is closed and reopened.
+// 鈥?otherwise the rail stays blank until the card is closed and reopened.
 {
   snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
   classInstances.clear()
@@ -671,11 +764,11 @@ check('an abdication of a different seat is ignored', (() => {
 }
 
 check('a non-abdicating crash report does not churn the seat', (() => {
-  const before = registrations.length
+  const before = seatRegs().length
   for (const listener of entryErrorListeners) {
-    listener('conversation.input.model', registrations.at(-1), new Error('chain declined'), { abdicated: false })
+    listener('conversation.input.model', seatRegs().at(-1), new Error('chain declined'), { abdicated: false })
   }
-  return registrations.length === before
+  return seatRegs().length === before
 })())
 
 check('diagnostics are published for DevTools', Array.isArray(globalThis.__dshThinkingSlider?.diagnostics) && globalThis.__dshThinkingSlider.diagnostics.length >= 1,

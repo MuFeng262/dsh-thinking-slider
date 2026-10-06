@@ -8,3 +8,7 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 凭据残留：沙箱会把写到 %TEMP% 的绝对路径剥掉非法字符后落到当前目录，
+# 于是 `%TEMP%\gcred-xxx` 会变成仓库里的 `UsersFXYAppDataLocalTempgcred-xxx`。
+*gcred*
