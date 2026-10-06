@@ -369,11 +369,17 @@ const elementOf = (type, props, path) => {
           const gradient = () => ({ addColorStop: (_offset, colour) => element.colours.push(String(colour)) })
           element.context = {
             setTransform() {},
-            clearRect() { element.clears += 1 },
+            // Each frame starts by clearing, so resetting here keeps `rects`
+            // holding exactly the most recently drawn frame.
+            clearRect() { element.clears += 1; element.rects = [] },
             beginPath() {}, arc() {}, moveTo() {}, lineTo() {},
             fill() { element.paints += 1; element.colours.push(String(this.fillStyle)) },
             stroke() { element.paints += 1; element.colours.push(String(this.strokeStyle)) },
-            fillRect() { element.paints += 1; element.colours.push(String(this.fillStyle)) },
+            fillRect(x, y, w, h) {
+              element.paints += 1
+              element.colours.push(String(this.fillStyle))
+              element.rects.push({ x, y, w, h, colour: String(this.fillStyle) })
+            },
             createLinearGradient: gradient,
             createRadialGradient: gradient,
           }
@@ -657,17 +663,21 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   const loopsInEnergy = rafLive.size
   check('energy mode runs exactly one animation loop', loopsInEnergy === 1, `loops=${loopsInEnergy}`)
 
-  // And that the loop actually paints something the eye can see. A colour equal
-  // to the fill's own tint composites to no change, which is invisible.
+  // And that the effect is actually visible: the energy rail is a dot lattice
+  // over a DARK track, so the gradient fill must be suppressed and the canvas
+  // must paint lit cells.
+  const fill = byClass(view, 'tsl-fill')[0]
+  check('energy mode hides the gradient fill so the lattice is the only colour',
+    fill?.props.style?.opacity === 0, `opacity=${String(fill?.props.style?.opacity)}`)
+
   const rgba = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/
-  const visible = (canvas?.colours ?? []).filter((colour) => {
+  const litCells = (canvas?.colours ?? []).filter((colour) => {
     const match = rgba.exec(colour)
     if (match === null) return false
-    const alpha = match[4] === undefined ? 1 : Number(match[4])
-    return alpha > 0.05 && match[1] === match[2] && match[2] === match[3]
+    return (match[4] === undefined ? 1 : Number(match[4])) > 0.05
   })
-  check('the energy renderer paints visible light', visible.length > 0 && (canvas?.paints ?? 0) > 0,
-    `paints=${String(canvas?.paints)} colours=${String(canvas?.colours?.length)} visibleLight=${visible.length}`)
+  check('the energy lattice paints lit cells', litCells.length > 0 && (canvas?.paints ?? 0) > 0,
+    `paints=${String(canvas?.paints)} cells=${litCells.length} colours=${String(canvas?.colours?.length)}`)
 
   // Switch back to particle and confirm the energy loop is torn down first.
   const row2 = rowRegs().at(-1)
@@ -853,6 +863,74 @@ check('apply never throws even on a broken composition', (() => {
     return false
   }
 })())
+
+// ---------------------------------------------------------------------------
+// Opt-in preview dump: replay the REAL renderer's recorded draws as SVG, so a
+// still can be reviewed without opening DSH. `TSL_FRAME_OUT=<dir>` to enable.
+// ---------------------------------------------------------------------------
+if (process.env.TSL_FRAME_OUT) {
+  const path_ = await import('node:path')
+  const fs_ = await import('node:fs')
+  const outDir = process.env.TSL_FRAME_OUT
+  fs_.mkdirSync(outDir, { recursive: true })
+
+  const LEVELS_TO_DUMP = [
+    { level: 'off', name: 'Off' },
+    { level: 'low', name: 'Low' },
+    { level: 'high', name: 'High' },
+    { level: 'max', name: 'Max' },
+  ]
+
+  const rowFor = (label, rects, fraction) => {
+    const W = 284
+    const H = 26
+    const knob = H
+    const scale = 2.2
+    const limit = knob / 2 + (W - knob) * fraction
+    const body = rects
+      .map((r) => `<rect x="${(r.x * scale).toFixed(1)}" y="${(r.y * scale).toFixed(1)}" width="${Math.max(0.6, r.w * scale).toFixed(1)}" height="${Math.max(0.6, r.h * scale).toFixed(1)}" fill="${r.colour}"/>`)
+      .join('')
+    return `<g><text x="0" y="-10" fill="#c9c9d2" font-size="13" font-family="Segoe UI">${label}</text>` +
+      `<rect x="0" y="0" width="${(W * scale).toFixed(0)}" height="${(H * scale).toFixed(0)}" rx="${(H * scale / 2).toFixed(1)}" fill="#16161a" stroke="#2c2c34"/>` +
+      body +
+      // The knob is a DOM element, so the still must place it explicitly.
+      `<circle cx="${(limit * scale).toFixed(1)}" cy="${(H * scale / 2).toFixed(1)}" r="${(knob * scale / 2).toFixed(1)}" fill="#ffffff"/>` +
+      `</g>`
+  }
+
+  const rows = []
+  // One fresh pass per level so the lattice shows the settled / burning state.
+  for (const entry of LEVELS_TO_DUMP) {
+    snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: entry.level }
+    classInstances.clear()
+    nodeCache.clear()
+    liveNodes = new Set()
+    hookSlots = []
+    effectSlots = []
+    pendingEffects = []
+    storage.set('dsh-thinking-slider:mode', 'energy')
+    const modeRow = rowRegs().at(-1)
+    byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
+      .find((c) => textOf(c) === '能量充能').props.onClick()
+
+    let v = collect(renderSeat())
+    const trigger = byClass(v, 'tsl-trigger')[0]
+    if (trigger) trigger.props.onClick()
+    v = collect(renderSeat())
+    // Pump well past the charge front so the still shows the settled state, which
+    // is what the rail looks like at rest.
+    for (let i = 0; i < 240; i += 1) pumpFrames(1)
+    v = collect(renderSeat())
+    const node = byClass(v, 'tsl-canvas')[0]
+    const fraction = LEVELS_TO_DUMP.indexOf(entry) / Math.max(1, LEVELS_TO_DUMP.length - 1)
+    rows.push(rowFor(entry.name, node?.rects ?? [], fraction))
+  }
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="700" height="${rows.length * 90 + 20}">
+<rect width="100%" height="100%" fill="#0e0e12"/>${rows.map((r, i) => `<g transform="translate(20 ${40 + i * 90})">${r}</g>`).join('')}</svg>`
+  fs_.writeFileSync(path_.join(outDir, 'energy-frames.svg'), svg)
+  console.log(`\npreview written: ${path_.join(outDir, 'energy-frames.svg')}`)
+}
 
 const failed = checks.filter((c) => !c.ok)
 console.log(failed.length === 0 ? `\nALL ${checks.length} CHECKS PASSED` : `\n${failed.length}/${checks.length} CHECK(S) FAILED`)
