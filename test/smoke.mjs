@@ -167,12 +167,28 @@ globalThis.ResizeObserver = undefined
  */
 let rafSeq = 0
 const rafLive = new Set()
-const rafStub = () => {
+/** Frames waiting to run; `pumpFrames` executes them so `draw` really runs. */
+const rafQueue = []
+const rafStub = (fn) => {
   const id = ++rafSeq
   rafLive.add(id)
+  rafQueue.push({ id, fn })
   return id
 }
-const cafStub = (id) => { rafLive.delete(id) }
+const cafStub = (id) => {
+  rafLive.delete(id)
+  const at = rafQueue.findIndex((entry) => entry.id === id)
+  if (at >= 0) rafQueue.splice(at, 1)
+}
+/** Run pending animation frames, as the browser eventually would. */
+const pumpFrames = (count = 2) => {
+  for (let n = 0; n < count; n += 1) {
+    for (const { id, fn } of rafQueue.splice(0)) {
+      rafLive.delete(id)
+      fn(1000 + n * 16.7)
+    }
+  }
+}
 globalThis.requestAnimationFrame = rafStub
 globalThis.cancelAnimationFrame = cafStub
 globalThis.window.requestAnimationFrame = rafStub
@@ -336,14 +352,30 @@ const elementOf = (type, props, path) => {
   let element = nodeCache.get(path)
   if (element === undefined || element.type !== type) {
     element = { type, path, bound: 0, clears: 0 }
-    element.getBoundingClientRect = () => (String(element.props?.className ?? '').includes('tsl-trackWrap') ? TRACK_RECT : { left: 0, top: 0, right: 320, bottom: 600, width: 320, height: 600 })
+    element.getBoundingClientRect = () => {
+      const className = String(element.props?.className ?? '')
+      if (className.includes('tsl-trackWrap')) return TRACK_RECT
+      // A canvas is inset:0 of the 26px rail, so its own box is rail-sized.
+      if (type === 'canvas') return { left: 100, top: 400, right: 384, bottom: 426, width: 284, height: 26 }
+      return { left: 0, top: 0, right: 320, bottom: 600, width: 320, height: 600 }
+    }
     if (type === 'canvas') {
+      /** Every colour the renderer painted or put into a gradient. */
+      element.colours = []
+      element.paints = 0
       // Observable proof that the animation loop bound to THIS node.
       element.getContext = () => {
         if (element.context === undefined) {
+          const gradient = () => ({ addColorStop: (_offset, colour) => element.colours.push(String(colour)) })
           element.context = {
-            setTransform() {}, clearRect() { element.clears += 1 }, beginPath() {}, arc() {},
-            fill() {}, moveTo() {}, lineTo() {}, stroke() {},
+            setTransform() {},
+            clearRect() { element.clears += 1 },
+            beginPath() {}, arc() {}, moveTo() {}, lineTo() {},
+            fill() { element.paints += 1; element.colours.push(String(this.fillStyle)) },
+            stroke() { element.paints += 1; element.colours.push(String(this.strokeStyle)) },
+            fillRect() { element.paints += 1; element.colours.push(String(this.fillStyle)) },
+            createLinearGradient: gradient,
+            createRadialGradient: gradient,
           }
         }
         element.bound += 1
@@ -410,6 +442,7 @@ const renderSeat = (props = {}) => {
     stateDirty = false
     tree = expand(reg.component({ ...face, locked: false, ...props }))
     flushEffects()
+    pumpFrames(2)
     pruneUnmounted()
     if (!stateDirty) break
   }
@@ -623,6 +656,18 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   // The complaint this guards: both renderers driving the same canvas at once.
   const loopsInEnergy = rafLive.size
   check('energy mode runs exactly one animation loop', loopsInEnergy === 1, `loops=${loopsInEnergy}`)
+
+  // And that the loop actually paints something the eye can see. A colour equal
+  // to the fill's own tint composites to no change, which is invisible.
+  const rgba = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/
+  const visible = (canvas?.colours ?? []).filter((colour) => {
+    const match = rgba.exec(colour)
+    if (match === null) return false
+    const alpha = match[4] === undefined ? 1 : Number(match[4])
+    return alpha > 0.05 && match[1] === match[2] && match[2] === match[3]
+  })
+  check('the energy renderer paints visible light', visible.length > 0 && (canvas?.paints ?? 0) > 0,
+    `paints=${String(canvas?.paints)} colours=${String(canvas?.colours?.length)} visibleLight=${visible.length}`)
 
   // Switch back to particle and confirm the energy loop is torn down first.
   const row2 = rowRegs().at(-1)
