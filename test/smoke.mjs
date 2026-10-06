@@ -160,9 +160,23 @@ globalThis.window = {
   removeEventListener: removeListener(listeners.window),
 }
 globalThis.matchMedia = globalThis.window.matchMedia
-globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame
-globalThis.cancelAnimationFrame = globalThis.window.cancelAnimationFrame
 globalThis.ResizeObserver = undefined
+/**
+ * Count live animation loops: a loop holds exactly one outstanding frame, so a
+ * mode switch that failed to tear the previous renderer down would leave two.
+ */
+let rafSeq = 0
+const rafLive = new Set()
+const rafStub = () => {
+  const id = ++rafSeq
+  rafLive.add(id)
+  return id
+}
+const cafStub = (id) => { rafLive.delete(id) }
+globalThis.requestAnimationFrame = rafStub
+globalThis.cancelAnimationFrame = cafStub
+globalThis.window.requestAnimationFrame = rafStub
+globalThis.window.cancelAnimationFrame = cafStub
 /** The plugin persists its mode client-locally; give it a real store to hit. */
 const storage = new Map()
 globalThis.localStorage = {
@@ -605,6 +619,18 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   const canvas = byClass(view, 'tsl-canvas')[0]
   check('energy mode binds its renderer to the rail canvas', canvas !== undefined && lastBoundCanvas === canvas,
     `bound=${String(canvas?.bound)}`)
+
+  // The complaint this guards: both renderers driving the same canvas at once.
+  const loopsInEnergy = rafLive.size
+  check('energy mode runs exactly one animation loop', loopsInEnergy === 1, `loops=${loopsInEnergy}`)
+
+  // Switch back to particle and confirm the energy loop is torn down first.
+  const row2 = rowRegs().at(-1)
+  byClass(collect(expand(row2.component({}))), 'tsl-segChoice').find((c) => textOf(c) === '粒子').props.onClick()
+  view = collect(renderSeat())
+  const loopsInParticle = rafLive.size
+  check('switching modes swaps the loop instead of stacking a second',
+    loopsInParticle === 1, `loops=${loopsInParticle}`)
 
   // A commit must hand the renderer a burst request it consumes.
   calls.length = 0
