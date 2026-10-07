@@ -86,7 +86,7 @@ const React = {
     if (slot === undefined || !sameDeps(slot.deps, deps)) hookSlots[at] = { value: fn, deps }
     return hookSlots[at].value
   },
-  // Effects really run, keyed on their dependency array, with cleanup 鈥?the
+  // Effects really run, keyed on their dependency array, with cleanup —the
   // only way to observe "did the animation loop re-bind to the new canvas".
   useEffect(effect, deps) {
     const at = hookCursor++
@@ -333,7 +333,7 @@ const slots = {
     const cell = cellOf(options)
     if (claimed.has(cell)) {
       duplicateStrikes += 1
-      throw new Error(`single slot "${options.name}" already has a registration at priority ${String(options.priority)} 鈥?register at a different priority to shadow it (lowest renders)`)
+      throw new Error(`single slot "${options.name}" already has a registration at priority ${String(options.priority)} —register at a different priority to shadow it (lowest renders)`)
     }
     claimed.add(cell)
     const registration = { options, component }
@@ -410,6 +410,9 @@ const llmConfig = {
       models: [
         { id: 'glm-5.3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
         { id: 'kimi-k3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
+        // In the model catalogue too, so the card's empty state and its fill
+        // button can be driven through the plugin's real face.
+        { id: 'plain-model', name: 'plain-model' },
       ],
     },
     nvidia: {
@@ -417,6 +420,13 @@ const llmConfig = {
       models: [
         { id: 'moonshotai/kimi-k3', name: 'Kimi K3' },
         { id: 'z-ai/glm-5.3', name: 'GLM-5.3', reasoningEfforts: { off: 'none', low: 'low' } },
+      ],
+    },
+    // Fully declared: must never be offered for filling.
+    teds: {
+      apiKeyEnv: 'TEDS_API_KEY',
+      models: [
+        { id: 'deepseek-v4-pro', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
       ],
     },
   },
@@ -603,7 +613,7 @@ const expand = (node, path = 'r') => {
 
 /**
  * One render pass, repeated while a commit-phase state write (a callback ref)
- * asks for another 鈥?that is how React reacts to `ref={setNode}`.
+ * asks for another —that is how React reacts to `ref={setNode}`.
  */
 const renderSeat = (props = {}) => {
   let tree = null
@@ -835,14 +845,15 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
     check('the levels row is registered', levelsRowReg() !== undefined)
     let levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
     check('the levels row lists only providers with level-less models',
-      textOf(levelsView).includes('nvidia') && !textOf(levelsView).includes('tokenrhythm'),
+      textOf(levelsView).includes('nvidia') && textOf(levelsView).includes('tokenrhythm')
+        && !textOf(levelsView).includes('teds'),
       textOf(levelsView).slice(0, 120))
     check('the levels row counts the level-less models',
-      textOf(levelsView).includes('1 个代理商共 1 个模型'), textOf(levelsView).slice(0, 120))
+      textOf(levelsView).includes('2 个代理商共 2 个模型'), textOf(levelsView).slice(0, 120))
 
     const fills = byClass(levelsView, 'tsl-fillApply')
     check('the levels row offers one fill per affected provider',
-      fills.length === 1 && textOf(fills[0]) === '补四档', String(fills.length))
+      fills.length === 2 && textOf(fills[0]) === '补四档', String(fills.length))
 
     const writesBefore = formWrites.length
     fills[0].props.onClick()
@@ -859,13 +870,37 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
         === JSON.stringify({ off: 'none', low: 'low' }),
       JSON.stringify(write?.next?.nvidia?.models?.[1]?.reasoningEfforts ?? null))
     check('another provider is left untouched',
-      write?.next?.tokenrhythm?.models?.length === 2
+      write?.next?.tokenrhythm?.models?.length === 3
         && write?.next?.tokenrhythm === llmConfig.providers.tokenrhythm,
       String(write?.next?.tokenrhythm?.models?.length))
 
     levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
-    check('the row reports everything declared once filled',
-      textOf(levelsView).includes('所有模型都已声明等级'), textOf(levelsView).slice(0, 80))
+    check('the row reports what is left after one fill',
+      textOf(levelsView).includes('1 个代理商共 1 个模型'), textOf(levelsView).slice(0, 120))
+    resetRender()
+  }
+
+  // The card is where someone looks when a model offers no levels, so the fix
+  // must be reachable there too — driven through the plugin's real face.
+  {
+    resetRender()
+    snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
+    const writesBefore = formWrites.length
+    let card = collect(renderSeat())
+    byClass(card, 'tsl-trigger')[0].props.onClick()
+    card = collect(renderSeat())
+    const button = byClass(card, 'tsl-fillApply')[0]
+    check('the card offers the level fix for the model in front of the user',
+      button !== undefined && textOf(button).includes('tokenrhythm'), textOf(button))
+    button.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const write = formWrites.at(-1)
+    const filled = write?.next?.tokenrhythm?.models?.find((model) => model.id === 'plain-model')
+    check('the card button writes the mapping through the real fill path',
+      formWrites.length === writesBefore + 1 && write?.field === 'providers'
+        && JSON.stringify(filled?.reasoningEfforts)
+          === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
+      JSON.stringify(filled?.reasoningEfforts ?? null))
     resetRender()
   }
 
@@ -1149,7 +1184,7 @@ check('an abdication of a different seat is ignored', (() => {
 
 // The particle loop is bound to a canvas ELEMENT. Switching to the model pane
 // unmounts that canvas and returning mounts a new one, so the loop must re-bind
-// 鈥?otherwise the rail stays blank until the card is closed and reopened.
+// —otherwise the rail stays blank until the card is closed and reopened.
 {
   snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
   classInstances.clear()
