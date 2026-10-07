@@ -133,6 +133,24 @@ const pruneUnmounted = () => {
   liveNodes = new Set()
 }
 
+/**
+ * Drop the current mount and everything it left running.
+ *
+ * Clearing instances alone orphans their animation frames, because their effect
+ * cleanups never run; those loops would then be counted against later
+ * assertions. Use this instead of clearing the caches by hand.
+ */
+const resetRender = () => {
+  classInstances.clear()
+  nodeCache.clear()
+  liveNodes = new Set()
+  hookSlots = []
+  effectSlots = []
+  pendingEffects = []
+  rafQueue.length = 0
+  rafLive.clear()
+}
+
 // ---------------------------------------------------------------------------
 // Host globals
 // ---------------------------------------------------------------------------
@@ -257,12 +275,60 @@ const injectedKeys = []
 const cellOf = (options) =>
   options.name === 'conversation.input.model' ? `p:${String(options.priority)}` : `id:${String(options.id)}`
 
+/** Slot declarations the harness serves, mirroring declaration lifecycles. */
+const declaredSlots = new Set(['conversation.input.model', 'settings.general.item'])
+/** Pending `slots.inject` waits, by slot key. */
+const injectWaits = new Map()
+
+/** Declare a slot and notify waiters, as a parent entry's children table does. */
+const declareSlot = (key) => {
+  declaredSlots.add(key)
+  for (const wait of [...(injectWaits.get(key) ?? [])]) wait.run()
+}
+
+/** Collapse a slot's declaration: the inject effects it installed are disposed. */
+const collapseSlot = (key) => {
+  declaredSlots.delete(key)
+  for (const wait of [...(injectWaits.get(key) ?? [])]) wait.dispose()
+}
+
 const slots = {
+  /**
+   * Faithful SlotService.inject: runs synchronously when the declaration already
+   * exists, otherwise waits for it, and runs again for every later declaration
+   * lifetime (the previous one having been disposed first).
+   */
   inject(key, callback) {
     injectedKeys.push(key)
-    return callback()
+    const wait = { active: null, stopped: false }
+    wait.dispose = () => {
+      if (wait.stopped) return
+      wait.stopped = true
+      wait.active?.()
+      wait.active = null
+    }
+    wait.run = () => {
+      if (wait.stopped) return
+      wait.active?.()
+      wait.active = null
+      if (!declaredSlots.has(key)) return
+      const dispose = callback()
+      wait.active = typeof dispose === 'function' ? dispose : null
+    }
+    if (!injectWaits.has(key)) injectWaits.set(key, new Set())
+    injectWaits.get(key).add(wait)
+    wait.run()
+    return () => {
+      injectWaits.get(key)?.delete(wait)
+      wait.dispose()
+    }
   },
   register(options, component) {
+    // SlotCore throws this when a parent entry's children table has not declared
+    // the slot yet — the load-order race this plugin must never walk into.
+    if (!declaredSlots.has(options.name)) {
+      throw new Error(`slot "${options.name}" is not declared (a parent entry's children table must declare it)`)
+    }
     // Mirror SlotCore: `single` refuses a taken priority, `list` a taken id.
     const cell = cellOf(options)
     if (claimed.has(cell)) {
@@ -322,7 +388,13 @@ const calls = []
 const directory = {
   store: { subscribe: () => () => {}, getSnapshot: () => snapshot },
   load: async () => ({ groups: catalogue }),
-  select: async (selection) => { calls.push(selection); return { ok: true } },
+  select: async (selection) => {
+    calls.push(selection)
+    // The host echoes an accepted selection back through the store; that echo is
+    // what reconciles the seat's optimistic level.
+    snapshot.current = { ...snapshot.current, ...selection }
+    return { ok: true }
+  },
 }
 
 /** The plugin's own derived scope, so a hot reload can be replayed. */
@@ -357,6 +429,33 @@ check('shadows at priority -1', reg.options.priority === -1, String(reg.options.
 
 const face = reg.options.inject('session-1')
 check('inject face shape', ['available', 'directory', 'load', 'select'].every((k) => k in face), Object.keys(face).join(','))
+
+// ---------------------------------------------------------------------------
+// Registration timing.
+//
+// `conversation.input.model` is declared by ui-conversation's composer bar, not
+// by this plugin, so BOTH apply() orders are legal. A profile that applies this
+// plugin first used to hit an eager register() and die with
+// `slot "conversation.input.model" is not declared`, losing the seat entirely.
+// ---------------------------------------------------------------------------
+{
+  // Drop earlier generations' waits so these counts are exact.
+  injectWaits.clear()
+  collapseSlot('conversation.input.model')
+  const before = seatRegs().length
+  const diagnosticsBefore = (globalThis.__dshThinkingSlider?.diagnostics ?? []).length
+  loadPlugin()
+  const raised = (globalThis.__dshThinkingSlider?.diagnostics ?? []).slice(diagnosticsBefore)
+  check('apply registers nothing while the seat slot is undeclared',
+    seatRegs().length === before, `registration attempts added=${seatRegs().length - before}`)
+  check('apply raises no "not declared" error',
+    !raised.some((entry) => /not declared/i.test(JSON.stringify(entry))),
+    JSON.stringify(raised).slice(0, 160))
+
+  declareSlot('conversation.input.model')
+  check('the seat mounts once the declaration arrives',
+    seatRegs().length === before + 1, `added=${seatRegs().length - before}`)
+}
 
 // ---------------------------------------------------------------------------
 // Render harness
@@ -545,6 +644,36 @@ calls.length = 0
 rail.props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
 await new Promise((resolve) => setTimeout(resolve, 0))
 check('ArrowLeft commits the previous level', calls.at(-1)?.reasoningEffort === 'low', JSON.stringify(calls.at(-1) ?? null))
+// The app re-renders after a commit; that render is what reconciles the
+// optimistic level against the echoed one.
+collect(renderSeat())
+
+// --- a commit shows the new level before the host answers ------------------
+{
+  snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'off' }
+  resetRender()
+  // The gate must be installed BEFORE the commit, so this really is a host that
+  // has not answered yet.
+  const never = async () => new Promise(() => {})
+  let slowView = collect(renderSeat({ select: never }))
+  byClass(slowView, 'tsl-trigger')[0].props.onClick()
+  slowView = collect(renderSeat({ select: never }))
+  const slowRail = byClass(slowView, 'tsl-trackWrap')[0]
+  slowRail.props.onPointerDown({ preventDefault() {}, currentTarget: { setPointerCapture() {} }, clientX: 419, pointerId: 1 })
+  slowRail.props.onPointerUp({ clientX: 419 })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  slowView = collect(renderSeat({ select: never }))
+  check('a commit shows the new level without waiting for the host',
+    textOf(byClass(slowView, 'tsl-level')[0]) === 'Max',
+    `level=${textOf(byClass(slowView, 'tsl-level')[0])}`)
+}
+
+// Re-open the card for the checks below, which read the rail's look and geometry.
+snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+resetRender()
+collect(renderSeat())
+byClass(collect(renderSeat()), 'tsl-trigger')[0].props.onClick()
+collect(renderSeat())
 
 // --- gradient climbs with the level ----------------------------------------
 snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'max' }
@@ -635,6 +764,31 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   check('the settings row defaults to particle',
     textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
 
+  // The directory must be fetched once per session, not once per render: the
+  // slot entry rebuilds `load` every pass, so an effect keyed on it re-fetches
+  // on every composer re-render — a network round-trip per reasoning-level change.
+  {
+    snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: 'high' }
+    resetRender()
+    let loads = 0
+    // A FRESH function each render, because that is what the slot entry hands
+    // down: reusing one reference would hide the bug this asserts against.
+    const makeLoad = () => () => { loads += 1 }
+    collect(renderSeat({ load: makeLoad() }))
+    const afterFirst = loads
+    for (let pass = 0; pass < 5; pass += 1) collect(renderSeat({ load: makeLoad() }))
+    check('the model directory loads once, not on every render',
+      afterFirst === 1 && loads === afterFirst, `first=${afterFirst} afterSixRenders=${loads}`)
+
+    // A fresh session must load again.
+    const otherDirectory = { subscribe: () => () => {}, getSnapshot: () => snapshot }
+    const beforeSessionChange = loads
+    collect(renderSeat({ load: makeLoad(), directory: otherDirectory }))
+    check('a different session loads its own directory',
+      loads === beforeSessionChange + 1, `before=${beforeSessionChange} after=${loads}`)
+    resetRender()
+  }
+
   // Switching to 官方 must give the composer back to the shipped selector.
   const claimedBefore = claimed.has('p:-1')
   choices.find((c) => textOf(c) === '官方').props.onClick()
@@ -651,6 +805,25 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   check('switching back reclaims the composer seat',
     seatRegs().length > seatsBefore && claimed.has('p:-1'),
     `before=${seatsBefore} after=${seatRegs().length} holds -1=${String(claimed.has('p:-1'))}`)
+}
+
+// A re-declaration must not resurrect the seat while the mode is `official`.
+{
+  const modeRow = rowRegs().at(-1)
+  byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
+    .find((c) => textOf(c) === '官方').props.onClick()
+  const afterOfficial = seatRegs().length
+  collapseSlot('conversation.input.model')
+  declareSlot('conversation.input.model')
+  check('official mode does not mount on a fresh declaration',
+    seatRegs().length === afterOfficial, `added=${seatRegs().length - afterOfficial}`)
+
+  // Back to particle: the live declaration must mount again.
+  byClass(collect(expand(rowRegs().at(-1).component({}))), 'tsl-segChoice')
+    .find((c) => textOf(c) === '粒子').props.onClick()
+  check('returning to particle mounts on the live declaration',
+    seatRegs().length === afterOfficial + 1 && claimed.has('p:-1'),
+    `added=${seatRegs().length - afterOfficial} holds -1=${String(claimed.has('p:-1'))}`)
 }
 
 // The energy rail must actually bind to the freshly mounted canvas.
