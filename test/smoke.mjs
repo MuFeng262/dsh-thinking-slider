@@ -400,11 +400,50 @@ const directory = {
   },
 }
 
+/** Writes the levels row performed through the settings transport. */
+const formWrites = []
+/** A stand-in for `llm-pi-ai`'s config, shaped like the real profile's. */
+const llmConfig = {
+  providers: {
+    tokenrhythm: {
+      apiKeyEnv: 'TOKENRHYTHM_API_KEY',
+      models: [
+        { id: 'glm-5.3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
+        { id: 'kimi-k3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
+      ],
+    },
+    nvidia: {
+      apiKeyEnv: 'NVIDIA_API_KEY',
+      models: [
+        { id: 'moonshotai/kimi-k3', name: 'Kimi K3' },
+        { id: 'z-ai/glm-5.3', name: 'GLM-5.3', reasoningEfforts: { off: 'none', low: 'low' } },
+      ],
+    },
+  },
+}
+const llmListeners = new Set()
+/** The settings transport's config form for a namespace. */
+const llmForm = {
+  getSnapshot: () => ({ value: llmConfig }),
+  subscribe: (listener) => {
+    llmListeners.add(listener)
+    return () => llmListeners.delete(listener)
+  },
+  set: (field, next) => {
+    formWrites.push({ field, next })
+    llmConfig[field] = next
+    for (const listener of [...llmListeners]) listener()
+    return Promise.resolve()
+  },
+}
+const configForms = { get: () => llmForm }
+
 /** The plugin's own derived scope, so a hot reload can be replayed. */
 const makeScope = () => ({
   slots,
   sessions: { subagentAddress: () => undefined },
   modelDirectories: { directoryFor: () => directory },
+  configForms,
   effect(fn) {
     return fn()
   },
@@ -426,7 +465,12 @@ check('waits for the composer seat and the General settings row',
   injectedKeys.includes('conversation.input.model') && injectedKeys.includes('settings.general.item'),
   injectedKeys.join(', '))
 check('registers exactly one seat', seatRegs().length === 1, String(seatRegs().length))
-check('registers exactly one settings row', rowRegs().length === 1, String(rowRegs().length))
+check('registers both settings rows', rowRegs().length === 2, String(rowRegs().length))
+
+/** The settings row with this registration id. */
+const rowById = (id) => rowRegs().find((entry) => entry.options.id === id)
+const modeRowReg = () => rowById('thinking-slider-mode')
+const levelsRowReg = () => rowById('thinking-slider-levels')
 const reg = seatRegs()[0]
 check('shadows at priority -1', reg.options.priority === -1, String(reg.options.priority))
 
@@ -766,7 +810,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
 // Rail modes: official hands the composer back, energy binds its own renderer
 // ---------------------------------------------------------------------------
 {
-  const row = rowRegs()[0]
+  const row = modeRowReg()
   const modeView = collect(expand(row.component({})))
   const choices = byClass(modeView, 'tsl-segChoice')
   check('the settings row offers every mode', choices.length === 3, String(choices.length))
@@ -774,6 +818,56 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
     choices.filter((c) => c.props['data-active'] === true).length === 1)
   check('the settings row defaults to particle',
     textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
+
+  // -------------------------------------------------------------------------
+  // Filling reasoning levels into llm-pi-ai's config.
+  //
+  // The Models settings page has no field for `reasoningEfforts`, so any provider
+  // added through it offers no levels. Nothing the client shows can fix that —
+  // the Host refuses an unmapped level — so the plugin writes the mapping into the
+  // config the adapter actually reads.
+  // -------------------------------------------------------------------------
+  {
+    // The hook slots are global to the harness, so drop the Seat's before
+    // rendering a settings row stand-alone (its `pane` state is the string
+    // 'effort', which is how a collision shows up).
+    resetRender()
+    check('the levels row is registered', levelsRowReg() !== undefined)
+    let levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
+    check('the levels row lists only providers with level-less models',
+      textOf(levelsView).includes('nvidia') && !textOf(levelsView).includes('tokenrhythm'),
+      textOf(levelsView).slice(0, 120))
+    check('the levels row counts the level-less models',
+      textOf(levelsView).includes('1 个代理商共 1 个模型'), textOf(levelsView).slice(0, 120))
+
+    const fills = byClass(levelsView, 'tsl-fillApply')
+    check('the levels row offers one fill per affected provider',
+      fills.length === 1 && textOf(fills[0]) === '补四档', String(fills.length))
+
+    const writesBefore = formWrites.length
+    fills[0].props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const write = formWrites.at(-1)
+    check('the fill writes the providers field',
+      formWrites.length === writesBefore + 1 && write?.field === 'providers', String(write?.field))
+    check('the level-less model gains exactly the four verified levels',
+      JSON.stringify(write?.next?.nvidia?.models?.[0]?.reasoningEfforts)
+        === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
+      JSON.stringify(write?.next?.nvidia?.models?.[0]?.reasoningEfforts ?? null))
+    check('a model that already declares levels keeps its own mapping',
+      JSON.stringify(write?.next?.nvidia?.models?.[1]?.reasoningEfforts)
+        === JSON.stringify({ off: 'none', low: 'low' }),
+      JSON.stringify(write?.next?.nvidia?.models?.[1]?.reasoningEfforts ?? null))
+    check('another provider is left untouched',
+      write?.next?.tokenrhythm?.models?.length === 2
+        && write?.next?.tokenrhythm === llmConfig.providers.tokenrhythm,
+      String(write?.next?.tokenrhythm?.models?.length))
+
+    levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
+    check('the row reports everything declared once filled',
+      textOf(levelsView).includes('所有模型都已声明等级'), textOf(levelsView).slice(0, 80))
+    resetRender()
+  }
 
   // The directory must be fetched once per session, not once per render: the
   // slot entry rebuilds `load` every pass, so an effect keyed on it re-fetches
@@ -820,7 +914,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
 
 // A re-declaration must not resurrect the seat while the mode is `official`.
 {
-  const modeRow = rowRegs().at(-1)
+  const modeRow = modeRowReg()
   byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
     .find((c) => textOf(c) === '官方').props.onClick()
   const afterOfficial = seatRegs().length
@@ -830,7 +924,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
     seatRegs().length === afterOfficial, `added=${seatRegs().length - afterOfficial}`)
 
   // Back to particle: the live declaration must mount again.
-  byClass(collect(expand(rowRegs().at(-1).component({}))), 'tsl-segChoice')
+  byClass(collect(expand(modeRowReg().component({}))), 'tsl-segChoice')
     .find((c) => textOf(c) === '粒子').props.onClick()
   check('returning to particle mounts on the live declaration',
     seatRegs().length === afterOfficial + 1 && claimed.has('p:-1'),
@@ -850,7 +944,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
 
   storage.set('dsh-thinking-slider:mode', 'energy')
   // The module reads its mode once; drive the store through the settings row.
-  const row = rowRegs().at(-1)
+  const row = modeRowReg()
   const modeView = collect(expand(row.component({})))
   byClass(modeView, 'tsl-segChoice').find((c) => textOf(c) === '能量充能').props.onClick()
 
@@ -926,7 +1020,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   }
 
   // Switch back to particle and confirm the energy loop is torn down first.
-  const row2 = rowRegs().at(-1)
+  const row2 = modeRowReg()
   byClass(collect(expand(row2.component({}))), 'tsl-segChoice').find((c) => textOf(c) === '粒子').props.onClick()
   view = collect(renderSeat())
   const loopsInParticle = rafLive.size
@@ -1159,7 +1253,7 @@ if (process.env.TSL_FRAME_OUT) {
       effectSlots = []
       pendingEffects = []
       storage.set('dsh-thinking-slider:mode', 'energy')
-      const modeRow = rowRegs().at(-1)
+      const modeRow = modeRowReg()
       byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
         .find((c) => textOf(c) === '能量充能').props.onClick()
 
