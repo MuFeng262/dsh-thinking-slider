@@ -448,23 +448,28 @@ const llmForm = {
 }
 /** Namespaces the levels row asked the transport for. */
 const formNamespaces = []
+/** A namespace the transport serves but which carries no `providers` value. */
+const emptyForm = {
+  getSnapshot: () => ({ value: undefined }),
+  subscribe: () => () => {},
+  set: () => {},
+}
 /**
- * The transport's settings namespaces, deliberately NOT the patch id: a
- * bundle-inserted row is served as `include:<patchId>`, which the plugin has to
- * discover rather than hardcode.
+ * The transport, shaped like the failing live case: the patch id `llm-pi-ai` is
+ * NOT the namespace that carries the config, the mirror reports no served
+ * namespaces at all, and only `include:llm-pi-ai` actually holds `providers`.
  */
-const servedNamespaces = ['include:llm-pi-ai']
 const configForms = {
   get: (namespace) => {
     formNamespaces.push(namespace)
-    return llmForm
+    return namespace === 'include:llm-pi-ai' ? llmForm : emptyForm
   },
-  describe: () => ({ getSnapshot: () => ({ view: { namespaces: servedNamespaces.map((ns) => ({ ns })) } }) }),
+  describe: () => ({ getSnapshot: () => ({ view: { namespaces: [] } }) }),
 }
-/** The lazy config-form target the plugin hands to its row and its card. */
+/** The config-form target the plugin hands to its row and its card. */
 const llmTarget = {
-  namespace: () => 'include:llm-pi-ai',
-  namespaces: () => servedNamespaces,
+  tried: () => ['llm-pi-ai', 'include:llm-pi-ai'],
+  resolve: () => ({ namespace: 'include:llm-pi-ai', form: llmForm }),
   form: () => llmForm,
 }
 
@@ -921,9 +926,11 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
         && JSON.stringify(filled?.reasoningEfforts)
           === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
       JSON.stringify(filled?.reasoningEfforts ?? null))
-    check('the plugin resolved the namespace the Host actually serves, not the patch id',
-      formNamespaces.includes('include:llm-pi-ai') && !formNamespaces.includes('llm-pi-ai'),
-      formNamespaces.join(', '))
+    check('the plugin resolved the namespace that actually carries providers',
+      formNamespaces.includes('include:llm-pi-ai'), formNamespaces.join(', '))
+    card = collect(renderSeat())
+    check('the card reports the mapping as written, not an error',
+      textOf(card).includes('已写入'), textOf(byClass(card, 'tsl-failure')[0] ?? card).slice(0, 90))
     resetRender()
   }
 
