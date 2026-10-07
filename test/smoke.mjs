@@ -385,11 +385,14 @@ const snapshot = {
 }
 
 const calls = []
+/** Every selection ever made — tests reset `calls`, the invariant must not. */
+const allCalls = []
 const directory = {
   store: { subscribe: () => () => {}, getSnapshot: () => snapshot },
   load: async () => ({ groups: catalogue }),
   select: async (selection) => {
     calls.push(selection)
+    allCalls.push(selection)
     // The host echoes an accepted selection back through the store; that echo is
     // what reconciles the seat's optimistic level.
     snapshot.current = { ...snapshot.current, ...selection }
@@ -585,25 +588,6 @@ const collect = (node, out = []) => {
 const byClass = (nodes, className) =>
   nodes.filter((n) => String(n.props?.className ?? '').split(' ').includes(className))
 
-/** Every node under one node, so a segmented group can be read in isolation. */
-const within = (node) => {
-  const collected = []
-  const walk = (n) => {
-    if (Array.isArray(n)) { n.forEach(walk); return }
-    if (n === null || n === undefined || typeof n !== 'object' || n.props === undefined) return
-    collected.push(n)
-    walk(n.props.children)
-  }
-  walk(node?.props?.children)
-  return collected
-}
-
-/** The choices of one labelled segmented control. */
-const segOf = (view, label) => {
-  const group = byClass(view, 'tsl-seg').find((g) => g.props['aria-label'] === label)
-  return group === undefined ? [] : byClass(within(group), 'tsl-segChoice')
-}
-
 /**
  * Guard the jsx(el, props, key) call shape: passing a children array as the
  * third argument silently renders nothing in React (it lands in `key`).
@@ -732,23 +716,15 @@ check('picking a model carries its default level', 'reasoningEffort' in (calls.a
 
 // --- a model with no reasoning levels ---------------------------------------
 snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
-let plain = collect(renderSeat())
-// The default fills the four levels in, so the control is reachable.
-check('a level-less model still gets the rail by default', byClass(plain, 'tsl-trackWrap').length === 1)
-{
-  // The card is still open from the previous block, so the rail is already there.
-  check('the filled levels are exactly Off / Low / High / Max',
-    ['Off', 'Low', 'High', 'Max'].every((name) => textOf(plain).includes(name)),
-    textOf(plain).slice(0, 120))
-}
-// Turning it off restores the shipped behaviour: no rail for such a model.
-{
-  const choices = segOf(collect(expand(rowRegs().at(-1).component({}))), '无等级模型的滑块')
-  choices.find((c) => textOf(c) === '不显示').props.onClick()
-  plain = collect(renderSeat())
-  check('turning the fill off hides the rail again', byClass(plain, 'tsl-trackWrap').length === 0)
-  const back = segOf(collect(expand(rowRegs().at(-1).component({}))), '无等级模型的滑块')
-  back.find((c) => textOf(c) === '补四档').props.onClick()
+const plain = collect(renderSeat())
+const plainRail = byClass(plain, 'tsl-trackWrap')[0]
+check('no-effort model renders no rail after opening', plainRail === undefined)
+if (plainRail !== undefined) {
+  // Should a rail ever appear here, drive it: the invariant below then reports
+  // the level this model would be asked for, which the host refuses.
+  plainRail.props.onPointerDown({ preventDefault() {}, currentTarget: { setPointerCapture() {} }, clientX: 419, pointerId: 1 })
+  plainRail.props.onPointerUp({ clientX: 419 })
+  await new Promise((resolve) => setTimeout(resolve, 0))
 }
 const plainTrigger = byClass(collect(renderSeat()), 'tsl-trigger')[0]
 check('no-effort trigger omits the level segment', !textOf(plainTrigger).includes('路'), JSON.stringify(textOf(plainTrigger)))
@@ -792,22 +768,12 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
 {
   const row = rowRegs()[0]
   const modeView = collect(expand(row.component({})))
-  const choices = segOf(modeView, '推理滑块模式')
+  const choices = byClass(modeView, 'tsl-segChoice')
   check('the settings row offers every mode', choices.length === 3, String(choices.length))
   check('the settings row marks the active mode',
     choices.filter((c) => c.props['data-active'] === true).length === 1)
   check('the settings row defaults to particle',
     textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
-  {
-    const fillChoices = segOf(modeView, '无等级模型的滑块')
-    check('the settings row offers the level-less fallback switch', fillChoices.length === 2,
-      String(fillChoices.length))
-    check('the fallback switch defaults to on and is marked active',
-      textOf(fillChoices.find((c) => c.props['data-active'] === true)) === '补四档')
-    check('the fallback switch says it is display only',
-      String(fillChoices[0]?.props.title ?? '').includes('reasoningEfforts'),
-      String(fillChoices[0]?.props.title ?? '').slice(0, 40))
-  }
 
   // The directory must be fetched once per session, not once per render: the
   // slot entry rebuilds `load` every pass, so an effect keyed on it re-fetches
@@ -1219,6 +1185,33 @@ if (process.env.TSL_FRAME_OUT) {
     console.log(`\npreview written: ${file}`)
   }
   setDarkTheme(true)
+}
+
+// ---------------------------------------------------------------------------
+// Invariant: never ask the host for a level the model does not report.
+//
+// The Host validates an explicit effort against the model's supported levels and
+// throws UNSUPPORTED_REASONING_EFFORT ("... does not support reasoning effort
+// ...") instead of clamping. A fallback that invents levels for a model that
+// declares none therefore turns every pick into a visible error, which is why
+// DSH reports no selectable levels at all for such a model.
+// ---------------------------------------------------------------------------
+{
+  const effortsFor = (provider, modelId) => {
+    const route = catalogue.find((entry) => entry.id === provider)
+    const model = route?.models?.find((entry) => entry.id === modelId)
+    return model?.reasoning?.efforts
+  }
+  const offenders = allCalls.filter((call) => {
+    if (call.reasoningEffort === undefined) return false
+    const efforts = effortsFor(call.provider, call.model)
+    if (!Array.isArray(efforts)) return true
+    return !efforts.some((level) => level?.id === call.reasoningEffort)
+  })
+  check('every requested level is one the model actually reports',
+    offenders.length === 0, JSON.stringify(offenders.slice(0, 2)))
+  check('the invariant actually observed level requests',
+    allCalls.some((call) => call.reasoningEffort !== undefined), String(allCalls.length))
 }
 
 const failed = checks.filter((c) => !c.ok)

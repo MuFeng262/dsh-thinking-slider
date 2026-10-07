@@ -13,44 +13,10 @@
 - **点开**：卡片里大字显示当前等级，`模型名 ›` 可切模型，下面一条厚滑块
 - **拖滑块**：即时切换推理强度；视觉随等级变化（见下方三种模式）
 - **键盘**：`←/→`、`Home/End` 切换，`Esc` 关闭
-- **降级**：模型没有声明推理等级时，默认仍补上 Off / Low / High / Max（见下），
-  可在设置里切回「不显示」恢复官方行为
+- **降级**：模型没有推理等级时只显示模型名，不出现滑块（不会给你一个假的控件）
 
 等级**不写死在插件里** —— 它读 DSH 上报的 `model.reasoning.efforts`，
 所以任何在配置里声明了 `reasoningEfforts` 的供应商路由都会自动出现在滑块上。
-
-### 模型没有声明等级时（默认补四档）
-
-有些第三方代理商的模型没有在配置里声明 `reasoningEfforts`，DSH 就认为它
-`reasoning: false`，滑块本来会整个消失。插件默认给这类模型补上
-**Off / Low / High / Max**，开关在 **设置 → 通用 → 模型未声明等级时**。
-
-> **⚠️ 这只改变「是否显示控件」，不会让模型真的多想。**
->
-> 等级能不能传到网关，由配置里的 `reasoningEfforts` 决定：没有声明时就没有
-> `thinkingLevelMap`，而 pi-ai 的 `clampThinkingLevel` 会把请求里的等级
-> **夹回 `off`** —— 不报错，也不产生任何推理差异。
->
-> 想让等级真正生效，得在 profile 的 `cordis.patch.yml` 里给那些模型声明映射：
->
-> ```yaml
-> - id: llm-pi-ai
->   name: "@deepseek-ai/dsh-llm-pi-ai"
->   config:
->     providers:
->       nvidia:
->         models:
->           - id: z-ai/glm-5.3
->             name: z-ai/glm-5.3
->             reasoningEfforts:
->               off: none      # off 留空表示「不发这个参数」
->               low: low
->               high: high
->               max: max
-> ```
->
-> 每个网关接受的拼写不一样（`none` / `low` / `high` / `max` 是实测可用的一套），
-> **填错会让请求 400**，所以换代理商时先在单个模型上试。
 
 ## 三种模式
 
