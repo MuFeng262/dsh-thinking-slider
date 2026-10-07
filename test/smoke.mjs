@@ -585,6 +585,25 @@ const collect = (node, out = []) => {
 const byClass = (nodes, className) =>
   nodes.filter((n) => String(n.props?.className ?? '').split(' ').includes(className))
 
+/** Every node under one node, so a segmented group can be read in isolation. */
+const within = (node) => {
+  const collected = []
+  const walk = (n) => {
+    if (Array.isArray(n)) { n.forEach(walk); return }
+    if (n === null || n === undefined || typeof n !== 'object' || n.props === undefined) return
+    collected.push(n)
+    walk(n.props.children)
+  }
+  walk(node?.props?.children)
+  return collected
+}
+
+/** The choices of one labelled segmented control. */
+const segOf = (view, label) => {
+  const group = byClass(view, 'tsl-seg').find((g) => g.props['aria-label'] === label)
+  return group === undefined ? [] : byClass(within(group), 'tsl-segChoice')
+}
+
 /**
  * Guard the jsx(el, props, key) call shape: passing a children array as the
  * third argument silently renders nothing in React (it lands in `key`).
@@ -713,9 +732,25 @@ check('picking a model carries its default level', 'reasoningEffort' in (calls.a
 
 // --- a model with no reasoning levels ---------------------------------------
 snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
-const plain = collect(renderSeat())
-check('no-effort model renders no rail after opening', byClass(plain, 'tsl-trackWrap').length === 0)
-const plainTrigger = byClass(plain, 'tsl-trigger')[0]
+let plain = collect(renderSeat())
+// The default fills the four levels in, so the control is reachable.
+check('a level-less model still gets the rail by default', byClass(plain, 'tsl-trackWrap').length === 1)
+{
+  // The card is still open from the previous block, so the rail is already there.
+  check('the filled levels are exactly Off / Low / High / Max',
+    ['Off', 'Low', 'High', 'Max'].every((name) => textOf(plain).includes(name)),
+    textOf(plain).slice(0, 120))
+}
+// Turning it off restores the shipped behaviour: no rail for such a model.
+{
+  const choices = segOf(collect(expand(rowRegs().at(-1).component({}))), '无等级模型的滑块')
+  choices.find((c) => textOf(c) === '不显示').props.onClick()
+  plain = collect(renderSeat())
+  check('turning the fill off hides the rail again', byClass(plain, 'tsl-trackWrap').length === 0)
+  const back = segOf(collect(expand(rowRegs().at(-1).component({}))), '无等级模型的滑块')
+  back.find((c) => textOf(c) === '补四档').props.onClick()
+}
+const plainTrigger = byClass(collect(renderSeat()), 'tsl-trigger')[0]
 check('no-effort trigger omits the level segment', !textOf(plainTrigger).includes('路'), JSON.stringify(textOf(plainTrigger)))
 
 // --- stability: a throwing directory must not escape the component ----------
@@ -757,12 +792,22 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
 {
   const row = rowRegs()[0]
   const modeView = collect(expand(row.component({})))
-  const choices = byClass(modeView, 'tsl-segChoice')
+  const choices = segOf(modeView, '推理滑块模式')
   check('the settings row offers every mode', choices.length === 3, String(choices.length))
   check('the settings row marks the active mode',
     choices.filter((c) => c.props['data-active'] === true).length === 1)
   check('the settings row defaults to particle',
     textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
+  {
+    const fillChoices = segOf(modeView, '无等级模型的滑块')
+    check('the settings row offers the level-less fallback switch', fillChoices.length === 2,
+      String(fillChoices.length))
+    check('the fallback switch defaults to on and is marked active',
+      textOf(fillChoices.find((c) => c.props['data-active'] === true)) === '补四档')
+    check('the fallback switch says it is display only',
+      String(fillChoices[0]?.props.title ?? '').includes('reasoningEfforts'),
+      String(fillChoices[0]?.props.title ?? '').slice(0, 40))
+  }
 
   // The directory must be fetched once per session, not once per render: the
   // slot entry rebuilds `load` every pass, so an effect keyed on it re-fetches
