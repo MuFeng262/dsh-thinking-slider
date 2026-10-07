@@ -446,7 +446,27 @@ const llmForm = {
     return Promise.resolve()
   },
 }
-const configForms = { get: () => llmForm }
+/** Namespaces the levels row asked the transport for. */
+const formNamespaces = []
+/**
+ * The transport's settings namespaces, deliberately NOT the patch id: a
+ * bundle-inserted row is served as `include:<patchId>`, which the plugin has to
+ * discover rather than hardcode.
+ */
+const servedNamespaces = ['include:llm-pi-ai']
+const configForms = {
+  get: (namespace) => {
+    formNamespaces.push(namespace)
+    return llmForm
+  },
+  describe: () => ({ getSnapshot: () => ({ view: { namespaces: servedNamespaces.map((ns) => ({ ns })) } }) }),
+}
+/** The lazy config-form target the plugin hands to its row and its card. */
+const llmTarget = {
+  namespace: () => 'include:llm-pi-ai',
+  namespaces: () => servedNamespaces,
+  form: () => llmForm,
+}
 
 /** The plugin's own derived scope, so a hot reload can be replayed. */
 const makeScope = () => ({
@@ -843,7 +863,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
     // 'effort', which is how a collision shows up).
     resetRender()
     check('the levels row is registered', levelsRowReg() !== undefined)
-    let levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
+    let levelsView = collect(expand(levelsRowReg().component({ target: llmTarget })))
     check('the levels row lists only providers with level-less models',
       textOf(levelsView).includes('nvidia') && textOf(levelsView).includes('tokenrhythm')
         && !textOf(levelsView).includes('teds'),
@@ -874,7 +894,7 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
         && write?.next?.tokenrhythm === llmConfig.providers.tokenrhythm,
       String(write?.next?.tokenrhythm?.models?.length))
 
-    levelsView = collect(expand(levelsRowReg().component({ form: llmForm })))
+    levelsView = collect(expand(levelsRowReg().component({ target: llmTarget })))
     check('the row reports what is left after one fill',
       textOf(levelsView).includes('1 个代理商共 1 个模型'), textOf(levelsView).slice(0, 120))
     resetRender()
@@ -901,6 +921,9 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
         && JSON.stringify(filled?.reasoningEfforts)
           === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
       JSON.stringify(filled?.reasoningEfforts ?? null))
+    check('the plugin resolved the namespace the Host actually serves, not the patch id',
+      formNamespaces.includes('include:llm-pi-ai') && !formNamespaces.includes('llm-pi-ai'),
+      formNamespaces.join(', '))
     resetRender()
   }
 
