@@ -140,11 +140,29 @@ const listeners = { window: {}, document: {} }
 const addListener = (bag) => (name, fn) => { (bag[name] ??= new Set()).add(fn) }
 const removeListener = (bag) => (name, fn) => { bag[name]?.delete(fn) }
 
+/** Attributes on the harness <body>, which carries the colour-scheme flag. */
+const bodyAttributes = new Set()
+/** Attribute watchers, so a theme flip reaches the plugin as it would live. */
+const bodyWatchers = new Set()
+
+globalThis.MutationObserver = class {
+  constructor(callback) { this.callback = callback }
+  observe() { bodyWatchers.add(this.callback) }
+  disconnect() { bodyWatchers.delete(this.callback) }
+}
+
+/** Flip the harness colour scheme and notify watchers, as the theme does. */
+const setDarkTheme = (dark) => {
+  if (dark) bodyAttributes.add('data-ds-dark-theme')
+  else bodyAttributes.delete('data-ds-dark-theme')
+  for (const callback of [...bodyWatchers]) callback()
+}
+
 globalThis.document = {
   querySelector: () => null,
   createElement: () => ({ dataset: {}, textContent: '', style: {}, appendChild() {} }),
   head: { appendChild() {} },
-  body: {},
+  body: { hasAttribute: (name) => bodyAttributes.has(name) },
   addEventListener: addListener(listeners.document),
   removeEventListener: removeListener(listeners.document),
 }
@@ -679,6 +697,50 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
   check('the energy lattice paints lit cells', litCells.length > 0 && (canvas?.paints ?? 0) > 0,
     `paints=${String(canvas?.paints)} cells=${litCells.length} colours=${String(canvas?.colours?.length)}`)
 
+  // The light scheme must not bleach cells toward white: that rail is already
+  // near-white, so the brightest cells would be the least visible ones. Measured
+  // on ONE frame's cells, ordered by opacity, so dim early frames cannot flatter
+  // the result.
+  {
+    /**
+
+     */
+    const saturationOf = (colour) => {
+      const match = rgba.exec(colour)
+      if (match === null) return 0
+      return Math.max(Number(match[1]), Number(match[2]), Number(match[3]))
+        - Math.min(Number(match[1]), Number(match[2]), Number(match[3]))
+    }
+    const alphaOf = (colour) => {
+      const match = rgba.exec(colour)
+      return match === null ? 0 : match[4] === undefined ? 1 : Number(match[4])
+    }
+
+    // Flip the scheme on the ALREADY MOUNTED rail: this exercises the same
+    // MutationObserver path a live theme switch takes, and avoids leaving a
+    // second canvas effect behind.
+    setDarkTheme(false)
+    collect(renderSeat())
+    for (let i = 0; i < 90; i += 1) pumpFrames(1)
+    const lightView = collect(renderSeat())
+    const lightCanvas = byClass(lightView, 'tsl-canvas')[0]
+    // `rects` holds only the most recently drawn frame.
+    const lightCells = (lightCanvas?.rects ?? []).map((r) => r.colour)
+    // The decisive property: in the light scheme NO clearly visible cell may be
+    // near-white, because a near-white cell on a near-white rail is invisible.
+    // Bleaching the tint by opacity cannot hide behind an average.
+    const visible = lightCells
+      .map((colour) => ({ alpha: alphaOf(colour), saturation: saturationOf(colour) }))
+      .filter((cell) => cell.alpha > 0.5)
+    const leastSaturated = visible.length === 0 ? 0 : Math.min(...visible.map((cell) => cell.saturation))
+    check('the light scheme never paints a near-white cell on its near-white rail',
+      visible.length >= 10 && leastSaturated > 100,
+      `cells=${lightCells.length} visible=${visible.length} leastSaturated=${leastSaturated}`)
+    // Restore the dark scheme for the remaining checks.
+    setDarkTheme(true)
+    collect(renderSeat())
+  }
+
   // Switch back to particle and confirm the energy loop is torn down first.
   const row2 = rowRegs().at(-1)
   byClass(collect(expand(row2.component({}))), 'tsl-segChoice').find((c) => textOf(c) === '粒子').props.onClick()
@@ -881,7 +943,7 @@ if (process.env.TSL_FRAME_OUT) {
     { level: 'max', name: 'Max' },
   ]
 
-  const rowFor = (label, rects, fraction) => {
+  const rowFor = (label, rects, fraction, light) => {
     const W = 284
     const H = 26
     const knob = H
@@ -890,46 +952,55 @@ if (process.env.TSL_FRAME_OUT) {
     const body = rects
       .map((r) => `<rect x="${(r.x * scale).toFixed(1)}" y="${(r.y * scale).toFixed(1)}" width="${Math.max(0.6, r.w * scale).toFixed(1)}" height="${Math.max(0.6, r.h * scale).toFixed(1)}" fill="${r.colour}"/>`)
       .join('')
-    return `<g><text x="0" y="-10" fill="#c9c9d2" font-size="13" font-family="Segoe UI">${label}</text>` +
-      `<rect x="0" y="0" width="${(W * scale).toFixed(0)}" height="${(H * scale).toFixed(0)}" rx="${(H * scale / 2).toFixed(1)}" fill="#16161a" stroke="#2c2c34"/>` +
+    // The rail's own surface follows the scheme, so the still is faithful.
+    const rail = light ? 'fill="#f6f6f8" stroke="#e2e2e8"' : 'fill="#16161a" stroke="#2c2c34"'
+    const ink = light ? '#3a3a44' : '#c9c9d2'
+    return `<g><text x="0" y="-10" fill="${ink}" font-size="13" font-family="Segoe UI">${label}</text>` +
+      `<rect x="0" y="0" width="${(W * scale).toFixed(0)}" height="${(H * scale).toFixed(0)}" rx="${(H * scale / 2).toFixed(1)}" ${rail}/>` +
       body +
       // The knob is a DOM element, so the still must place it explicitly.
-      `<circle cx="${(limit * scale).toFixed(1)}" cy="${(H * scale / 2).toFixed(1)}" r="${(knob * scale / 2).toFixed(1)}" fill="#ffffff"/>` +
+      `<circle cx="${(limit * scale).toFixed(1)}" cy="${(H * scale / 2).toFixed(1)}" r="${(knob * scale / 2).toFixed(1)}" fill="#ffffff" stroke="${light ? '#dcdce4' : 'none'}"/>` +
       `</g>`
   }
 
-  const rows = []
-  // One fresh pass per level so the lattice shows the settled / burning state.
-  for (const entry of LEVELS_TO_DUMP) {
-    snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: entry.level }
-    classInstances.clear()
-    nodeCache.clear()
-    liveNodes = new Set()
-    hookSlots = []
-    effectSlots = []
-    pendingEffects = []
-    storage.set('dsh-thinking-slider:mode', 'energy')
-    const modeRow = rowRegs().at(-1)
-    byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
-      .find((c) => textOf(c) === '能量充能').props.onClick()
+  const dumpTheme = (light) => {
+    setDarkTheme(!light)
+    const rows = []
+    for (const entry of LEVELS_TO_DUMP) {
+      snapshot.current = { provider: 'tokenrhythm', model: 'glm-5.3', reasoningEffort: entry.level }
+      classInstances.clear()
+      nodeCache.clear()
+      liveNodes = new Set()
+      hookSlots = []
+      effectSlots = []
+      pendingEffects = []
+      storage.set('dsh-thinking-slider:mode', 'energy')
+      const modeRow = rowRegs().at(-1)
+      byClass(collect(expand(modeRow.component({}))), 'tsl-segChoice')
+        .find((c) => textOf(c) === '能量充能').props.onClick()
 
-    let v = collect(renderSeat())
-    const trigger = byClass(v, 'tsl-trigger')[0]
-    if (trigger) trigger.props.onClick()
-    v = collect(renderSeat())
-    // Pump well past the charge front so the still shows the settled state, which
-    // is what the rail looks like at rest.
-    for (let i = 0; i < 240; i += 1) pumpFrames(1)
-    v = collect(renderSeat())
-    const node = byClass(v, 'tsl-canvas')[0]
-    const fraction = LEVELS_TO_DUMP.indexOf(entry) / Math.max(1, LEVELS_TO_DUMP.length - 1)
-    rows.push(rowFor(entry.name, node?.rects ?? [], fraction))
+      let v = collect(renderSeat())
+      const trigger = byClass(v, 'tsl-trigger')[0]
+      if (trigger) trigger.props.onClick()
+      v = collect(renderSeat())
+      // Pump well past the charge front so the still shows the settled state.
+      for (let i = 0; i < 240; i += 1) pumpFrames(1)
+      v = collect(renderSeat())
+      const node = byClass(v, 'tsl-canvas')[0]
+      const fraction = LEVELS_TO_DUMP.indexOf(entry) / Math.max(1, LEVELS_TO_DUMP.length - 1)
+      rows.push(rowFor(entry.name, node?.rects ?? [], fraction, light))
+    }
+    const background = light ? '#ffffff' : '#0e0e12'
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="700" height="${rows.length * 90 + 20}">
+<rect width="100%" height="100%" fill="${background}"/>${rows.map((r, i) => `<g transform="translate(20 ${40 + i * 90})">${r}</g>`).join('')}</svg>`
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="700" height="${rows.length * 90 + 20}">
-<rect width="100%" height="100%" fill="#0e0e12"/>${rows.map((r, i) => `<g transform="translate(20 ${40 + i * 90})">${r}</g>`).join('')}</svg>`
-  fs_.writeFileSync(path_.join(outDir, 'energy-frames.svg'), svg)
-  console.log(`\npreview written: ${path_.join(outDir, 'energy-frames.svg')}`)
+  for (const [name, light] of [['dark', false], ['light', true]]) {
+    const file = path_.join(outDir, `energy-frames-${name}.svg`)
+    fs_.writeFileSync(file, dumpTheme(light))
+    console.log(`\npreview written: ${file}`)
+  }
+  setDarkTheme(true)
 }
 
 const failed = checks.filter((c) => !c.ok)
