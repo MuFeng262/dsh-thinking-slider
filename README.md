@@ -1,5 +1,7 @@
 # dsh-thinking-slider
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+
 把 DeepSeek Harness（DSH）composer 里的**模型选择器**换成「模型 + 推理强度」：
 平时显示 `模型名 · 等级`，点开是一张卡片 —— 上面是模型列表入口，下面是带**渐变与粒子**的强度滑块。
 
