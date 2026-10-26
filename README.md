@@ -7,7 +7,7 @@
 
 *An opinionated model + reasoning-effort picker for the DSH composer, with a gradient particle rail.*
 
-![四档对比](docs/preview.png)
+![推理滑块 · 粒子模式](docs/shot-particle.png)
 
 ## 它做什么
 
