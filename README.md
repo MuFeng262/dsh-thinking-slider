@@ -43,6 +43,10 @@
 再往白漂就等于把格子从视野里抹掉。配色跟随 `data-ds-dark-theme` 实时切换，
 不用重开卡片。
 
+| 官方 | 粒子 | 能量充能 |
+| --- | --- | --- |
+| ![官方样式：DSH 官方模型 / 推理等级菜单](docs/shot-official.png) | ![粒子模式：渐变轨道 + 漂浮粒子](docs/shot-particle.png) | ![能量充能模式：点阵充能场](docs/shot-energy.png) |
+
 | 深色 | 浅色 |
 | --- | --- |
 | ![能量充能 · 深色](docs/energy-mode.png) | ![能量充能 · 浅色](docs/energy-mode-light.png) |
@@ -66,6 +70,8 @@
 - 只补**没有声明**的模型；已经声明过的原样保留
 - **逐代理商确认，不做全自动**：若某个网关不接受 `reasoning_effort`，会让那个代理商
   的请求全部失败。`none / low / high / max` 是实测可用的拼写，但**换网关要先试一个模型**
+
+![设置 → 通用 → 模型推理等级：逐代理商「补四档」](docs/shot-settings.png)
 
 ## 要求
 
