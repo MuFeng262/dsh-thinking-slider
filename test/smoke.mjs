@@ -513,6 +513,40 @@ const face = reg.options.inject('session-1')
 check('inject face shape', ['available', 'directory', 'load', 'select'].every((k) => k in face), Object.keys(face).join(','))
 
 // ---------------------------------------------------------------------------
+// Card material.
+//
+// `--dsw-alias-bg-overlay` is the MASK colour behind a dialog (light #e9ecf2,
+// dark #61666b -- lighter than the page), not a panel fill, so painting the card
+// with it produced a solid grey slab instead of DSH's frosted menu surface. And
+// `--dsw-alias-bg-layer-2` is #ffffff in light mode, so a recess drawn with it is
+// invisible on a white card. The styles live in one string, so assert the rules
+// themselves; the harness has no computed styles.
+// ---------------------------------------------------------------------------
+{
+  const source = fs.readFileSync(path.join(pluginDir, 'lib', 'client.js'), 'utf8')
+  // One rule per line in the stylesheet, so match from the line start: a plain
+  // indexOf('.tsl-track{') also hits `.tsl-trackWrap:focus-visible .tsl-track{`.
+  const rule = (selector) => source.split(/\r?\n/).find((line) => line.startsWith(`${selector}{`)) ?? ''
+  const card = rule('.tsl-card')
+  check('the card uses the menu surface token, not the mask colour',
+    card.includes('var(--dsw-specific-menu') && !card.includes('--dsw-alias-bg-overlay'),
+    card.slice(0, 90))
+  check('the card carries the menu frosted backdrop',
+    card.includes('backdrop-filter:var(--dsw-menu-backdrop-filter')
+      && card.includes('-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter'),
+    card.slice(0, 90))
+  check('no rule paints a surface with the mask colour',
+    !source.includes('--dsw-alias-bg-overlay'), 'a --dsw-alias-bg-overlay use survived')
+  check('the selected segment reads as active, not as a mask',
+    rule('.tsl-segChoice[data-active=true]').includes('--dsw-alias-interactive-bg-active'),
+    rule('.tsl-segChoice[data-active=true]').slice(0, 90))
+  for (const selector of ['.tsl-track', '.tsl-fillChip', '.tsl-seg']) {
+    check(`${selector} recesses with an interactive fill, visible in light mode`,
+      rule(selector).includes('--dsw-alias-interactive-bg-hover'), rule(selector).slice(0, 90))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registration timing.
 //
 // `conversation.input.model` is declared by ui-conversation's composer bar, not
