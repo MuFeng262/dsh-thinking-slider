@@ -178,12 +178,15 @@ dsh plugin --profile desktop remove dsh-thinking-slider
 ```bash
 git clone https://github.com/MuFeng262/dsh-thinking-slider
 cd dsh-thinking-slider
-node test/smoke.mjs      # 66 项行为测试，零依赖，不需要 DSH
+node test/smoke.mjs      # 106 项行为测试，零依赖，不需要 DSH
 ```
 
 `test/smoke.mjs` 自带一个迷你 React 运行时（hooks 槽位、类组件与错误边界、
 跨渲染的 DOM 节点身份、真实执行的 effect 与 cleanup），所以
 「节点重挂后动画有没有重新绑定」这类问题是可以断言的，不需要开浏览器。
+
+发布新版本见 [RELEASING.md](RELEASING.md)：Release 说明**必须中英双语**，
+release 附件与 npm 包用同一个 tarball（保证字节一致）。
 
 ## 许可
 
