@@ -400,85 +400,11 @@ const directory = {
   },
 }
 
-/** Writes the levels row performed through the settings transport. */
-const formWrites = []
-/** A stand-in for `llm-pi-ai`'s config, shaped like the real profile's. */
-const llmConfig = {
-  providers: {
-    tokenrhythm: {
-      apiKeyEnv: 'TOKENRHYTHM_API_KEY',
-      models: [
-        { id: 'glm-5.3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
-        { id: 'kimi-k3', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
-        // In the model catalogue too, so the card's empty state and its fill
-        // button can be driven through the plugin's real face.
-        { id: 'plain-model', name: 'plain-model' },
-      ],
-    },
-    nvidia: {
-      apiKeyEnv: 'NVIDIA_API_KEY',
-      models: [
-        { id: 'moonshotai/kimi-k3', name: 'Kimi K3' },
-        { id: 'z-ai/glm-5.3', name: 'GLM-5.3', reasoningEfforts: { off: 'none', low: 'low' } },
-      ],
-    },
-    // Fully declared: must never be offered for filling.
-    teds: {
-      apiKeyEnv: 'TEDS_API_KEY',
-      models: [
-        { id: 'deepseek-v4-pro', reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' } },
-      ],
-    },
-  },
-}
-const llmListeners = new Set()
-/** The settings transport's config form for a namespace. */
-const llmForm = {
-  getSnapshot: () => ({ value: llmConfig }),
-  subscribe: (listener) => {
-    llmListeners.add(listener)
-    return () => llmListeners.delete(listener)
-  },
-  set: (field, next) => {
-    formWrites.push({ field, next })
-    llmConfig[field] = next
-    for (const listener of [...llmListeners]) listener()
-    return Promise.resolve()
-  },
-}
-/** Namespaces the levels row asked the transport for. */
-const formNamespaces = []
-/** A namespace the transport serves but which carries no `providers` value. */
-const emptyForm = {
-  getSnapshot: () => ({ value: undefined }),
-  subscribe: () => () => {},
-  set: () => {},
-}
-/**
- * The transport, shaped like the failing live case: the patch id `llm-pi-ai` is
- * NOT the namespace that carries the config, the mirror reports no served
- * namespaces at all, and only `include:llm-pi-ai` actually holds `providers`.
- */
-const configForms = {
-  get: (namespace) => {
-    formNamespaces.push(namespace)
-    return namespace === 'include:llm-pi-ai' ? llmForm : emptyForm
-  },
-  describe: () => ({ getSnapshot: () => ({ view: { namespaces: [] } }) }),
-}
-/** The config-form target the plugin hands to its row and its card. */
-const llmTarget = {
-  tried: () => ['llm-pi-ai', 'include:llm-pi-ai'],
-  resolve: () => ({ namespace: 'include:llm-pi-ai', form: llmForm }),
-  form: () => llmForm,
-}
-
 /** The plugin's own derived scope, so a hot reload can be replayed. */
 const makeScope = () => ({
   slots,
   sessions: { subagentAddress: () => undefined },
   modelDirectories: { directoryFor: () => directory },
-  configForms,
   effect(fn) {
     return fn()
   },
@@ -500,12 +426,11 @@ check('waits for the composer seat and the General settings row',
   injectedKeys.includes('conversation.input.model') && injectedKeys.includes('settings.general.item'),
   injectedKeys.join(', '))
 check('registers exactly one seat', seatRegs().length === 1, String(seatRegs().length))
-check('registers both settings rows', rowRegs().length === 2, String(rowRegs().length))
+check('registers one settings row', rowRegs().length === 1, String(rowRegs().length))
 
 /** The settings row with this registration id. */
 const rowById = (id) => rowRegs().find((entry) => entry.options.id === id)
 const modeRowReg = () => rowById('thinking-slider-mode')
-const levelsRowReg = () => rowById('thinking-slider-levels')
 const reg = seatRegs()[0]
 check('shadows at priority -1', reg.options.priority === -1, String(reg.options.priority))
 
@@ -540,10 +465,23 @@ check('inject face shape', ['available', 'directory', 'load', 'select'].every((k
   check('the selected segment reads as active, not as a mask',
     rule('.tsl-segChoice[data-active=true]').includes('--dsw-alias-interactive-bg-active'),
     rule('.tsl-segChoice[data-active=true]').slice(0, 90))
-  for (const selector of ['.tsl-track', '.tsl-fillChip', '.tsl-seg']) {
+  for (const selector of ['.tsl-track', '.tsl-seg']) {
     check(`${selector} recesses with an interactive fill, visible in light mode`,
       rule(selector).includes('--dsw-alias-interactive-bg-hover'), rule(selector).slice(0, 90))
   }
+}
+
+// DSH 0.2.2 owns reasoning-level declaration: Settings → Models edits
+// `reasoningEfforts` per model and validates it against the protocol's allowed
+// levels (Gemini accepts only minimal/low/medium/high). A plugin that writes that
+// config itself both duplicates the field and can write a level the protocol
+// rejects, so this plugin must not touch it again.
+{
+  const source = fs.readFileSync(path.join(pluginDir, 'lib', 'client.js'), 'utf8')
+  for (const gone of ['configForms', 'fillProviderLevels', 'reasoningEfforts:']) {
+    check(`the plugin no longer writes model config (${gone})`, !source.includes(gone))
+  }
+  check('the card no longer offers a level-fill button', !source.includes('tsl-fillApply'))
 }
 
 // ---------------------------------------------------------------------------
@@ -887,86 +825,6 @@ check('the boundary renders a fallback instead of nothing', byClass(boundaryView
     choices.filter((c) => c.props['data-active'] === true).length === 1)
   check('the settings row defaults to particle',
     textOf(choices.find((c) => c.props['data-active'] === true)) === '粒子')
-
-  // -------------------------------------------------------------------------
-  // Filling reasoning levels into llm-pi-ai's config.
-  //
-  // The Models settings page has no field for `reasoningEfforts`, so any provider
-  // added through it offers no levels. Nothing the client shows can fix that —
-  // the Host refuses an unmapped level — so the plugin writes the mapping into the
-  // config the adapter actually reads.
-  // -------------------------------------------------------------------------
-  {
-    // The hook slots are global to the harness, so drop the Seat's before
-    // rendering a settings row stand-alone (its `pane` state is the string
-    // 'effort', which is how a collision shows up).
-    resetRender()
-    check('the levels row is registered', levelsRowReg() !== undefined)
-    let levelsView = collect(expand(levelsRowReg().component({ target: llmTarget })))
-    check('the levels row lists only providers with level-less models',
-      textOf(levelsView).includes('nvidia') && textOf(levelsView).includes('tokenrhythm')
-        && !textOf(levelsView).includes('teds'),
-      textOf(levelsView).slice(0, 120))
-    check('the levels row counts the level-less models',
-      textOf(levelsView).includes('2 个代理商共 2 个模型'), textOf(levelsView).slice(0, 120))
-
-    const fills = byClass(levelsView, 'tsl-fillApply')
-    check('the levels row offers one fill per affected provider',
-      fills.length === 2 && textOf(fills[0]) === '补四档', String(fills.length))
-
-    const writesBefore = formWrites.length
-    fills[0].props.onClick()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    const write = formWrites.at(-1)
-    check('the fill writes the providers field',
-      formWrites.length === writesBefore + 1 && write?.field === 'providers', String(write?.field))
-    check('the level-less model gains exactly the four verified levels',
-      JSON.stringify(write?.next?.nvidia?.models?.[0]?.reasoningEfforts)
-        === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
-      JSON.stringify(write?.next?.nvidia?.models?.[0]?.reasoningEfforts ?? null))
-    check('a model that already declares levels keeps its own mapping',
-      JSON.stringify(write?.next?.nvidia?.models?.[1]?.reasoningEfforts)
-        === JSON.stringify({ off: 'none', low: 'low' }),
-      JSON.stringify(write?.next?.nvidia?.models?.[1]?.reasoningEfforts ?? null))
-    check('another provider is left untouched',
-      write?.next?.tokenrhythm?.models?.length === 3
-        && write?.next?.tokenrhythm === llmConfig.providers.tokenrhythm,
-      String(write?.next?.tokenrhythm?.models?.length))
-
-    levelsView = collect(expand(levelsRowReg().component({ target: llmTarget })))
-    check('the row reports what is left after one fill',
-      textOf(levelsView).includes('1 个代理商共 1 个模型'), textOf(levelsView).slice(0, 120))
-    resetRender()
-  }
-
-  // The card is where someone looks when a model offers no levels, so the fix
-  // must be reachable there too — driven through the plugin's real face.
-  {
-    resetRender()
-    snapshot.current = { provider: 'tokenrhythm', model: 'plain-model' }
-    const writesBefore = formWrites.length
-    let card = collect(renderSeat())
-    byClass(card, 'tsl-trigger')[0].props.onClick()
-    card = collect(renderSeat())
-    const button = byClass(card, 'tsl-fillApply')[0]
-    check('the card offers the level fix for the model in front of the user',
-      button !== undefined && textOf(button).includes('tokenrhythm'), textOf(button))
-    button.props.onClick()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    const write = formWrites.at(-1)
-    const filled = write?.next?.tokenrhythm?.models?.find((model) => model.id === 'plain-model')
-    check('the card button writes the mapping through the real fill path',
-      formWrites.length === writesBefore + 1 && write?.field === 'providers'
-        && JSON.stringify(filled?.reasoningEfforts)
-          === JSON.stringify({ off: 'none', low: 'low', high: 'high', max: 'max' }),
-      JSON.stringify(filled?.reasoningEfforts ?? null))
-    check('the plugin resolved the namespace that actually carries providers',
-      formNamespaces.includes('include:llm-pi-ai'), formNamespaces.join(', '))
-    card = collect(renderSeat())
-    check('the card reports the mapping as written, not an error',
-      textOf(card).includes('已写入'), textOf(byClass(card, 'tsl-failure')[0] ?? card).slice(0, 90))
-    resetRender()
-  }
 
   // The directory must be fetched once per session, not once per render: the
   // slot entry rebuilds `load` every pass, so an effect keyed on it re-fetches

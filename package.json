@@ -1,7 +1,7 @@
 {
   "name": "dsh-thinking-slider",
-  "version": "0.3.4",
-  "description": "Codex-style reasoning-effort slider for the DeepSeek Harness composer: pick a model, then drag its thinking level on a gradient particle rail.",
+  "version": "0.4.0",
+  "description": "Three visual modes for picking a model's reasoning level in the DeepSeek Harness composer: hand back to the native selector, a gradient particle rail, or an energy-charging track. The levels themselves come from DSH.",
   "type": "module",
   "license": "MIT",
   "author": "MuFeng262",
