@@ -462,6 +462,16 @@ check('inject face shape', ['available', 'directory', 'load', 'select'].every((k
     card.slice(0, 90))
   check('no rule paints a surface with the mask colour',
     !source.includes('--dsw-alias-bg-overlay'), 'a --dsw-alias-bg-overlay use survived')
+  // The same decoration plugin that makes the surfaces glass marks <body>, so the
+  // card opts out of translucency only while it is active — otherwise the
+  // wallpaper shows through the panel as a band across the composer card.
+  check('the card turns opaque while a wallpaper plugin is active',
+    source.includes('body[data-we-wallpaper] .tsl-card{')
+      && source.includes('body[data-we-wallpaper][data-ds-dark-theme] .tsl-card{'),
+    'the wallpaper opt-out rules are missing')
+  check('the wallpaper opt-out drops the frosted backdrop',
+    /body\[data-we-wallpaper\] \.tsl-card\{[^}]*backdrop-filter:none/.test(source.replace(/\n/g, ' ')),
+    'the card would keep blurring the wallpaper behind it')
   check('the selected segment reads as active, not as a mask',
     rule('.tsl-segChoice[data-active=true]').includes('--dsw-alias-interactive-bg-active'),
     rule('.tsl-segChoice[data-active=true]').slice(0, 90))
