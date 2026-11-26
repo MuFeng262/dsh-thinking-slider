@@ -1,6 +1,6 @@
 {
   "name": "dsh-thinking-slider",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Three visual modes for picking a model's reasoning level in the DeepSeek Harness composer: hand back to the native selector, a gradient particle rail, or an energy-charging track. The levels themselves come from DSH.",
   "type": "module",
   "license": "MIT",

@@ -468,6 +468,15 @@ check('inject face shape', ['available', 'directory', 'load', 'select'].every((k
   for (const selector of ['.tsl-track', '.tsl-seg']) {
     check(`${selector} recesses with an interactive fill, visible in light mode`,
       rule(selector).includes('--dsw-alias-interactive-bg-hover'), rule(selector).slice(0, 90))
+    // A decoration plugin (wallpaper/glass) rewrites the background tokens to
+    // translucent `color-mix` values and sets `--dsw-alias-bg-base: transparent`,
+    // so a surface built only from tokens becomes see-through and the wallpaper
+    // shows through as a band. These two surfaces are controls, not glass: they
+    // must keep an opaque base of their own, per colour scheme.
+    check(`${selector} keeps an opaque base so a wallpaper cannot show through`,
+      /,#[0-9a-f]{6}(;|\})/i.test(rule(selector).replace(/\s+/g, ''))
+        && source.includes(`body[data-ds-dark-theme] ${selector}{`),
+      rule(selector).slice(0, 110))
   }
 }
 
