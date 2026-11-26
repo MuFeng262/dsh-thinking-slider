@@ -462,6 +462,14 @@ check('inject face shape', ['available', 'directory', 'load', 'select'].every((k
     card.slice(0, 90))
   check('no rule paints a surface with the mask colour',
     !source.includes('--dsw-alias-bg-overlay'), 'a --dsw-alias-bg-overlay use survived')
+  // Decoration plugins re-skin `[role="dialog"]` popups: the wallpaper plugin
+  // paints a readability panel behind dialogs and rewrites their layer tokens,
+  // which peeked out as a light strip at the card's edge. Its selectors exempt
+  // `data-we-surface-runtime` — "this surface manages its own look" — so the card
+  // carries that marker.
+  check('the card opts out of decoration plugins re-skinning dialogs',
+    source.includes("'data-we-surface-runtime': ''"),
+    'the card would be re-skinned by a wallpaper/dialog plugin again')
   // The same decoration plugin that makes the surfaces glass marks <body>, so the
   // card opts out of translucency only while it is active — otherwise the
   // wallpaper shows through the panel as a band across the composer card.
