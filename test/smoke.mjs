@@ -475,6 +475,14 @@ check('inject face shape', ['available', 'directory', 'load', 'select'].every((k
   check('the selected segment reads as active, not as a mask',
     rule('.tsl-segChoice[data-active=true]').includes('--dsw-alias-interactive-bg-active'),
     rule('.tsl-segChoice[data-active=true]').slice(0, 90))
+  // Vertical layout: content that only covers a middle strip of the rail reads as
+  // a horizontal band, which is far more obvious once a wallpaper is behind the
+  // panel. Both renderers must cover the rail by construction.
+  check('the lattice derives its cell height from the row count, so rows fill the rail',
+    source.includes('cellH = height / rows'), 'the lattice can leave margins above and below')
+  check('particles are spread across the whole rail instead of a middle strip',
+    /particle\.y = height \* \(0\.1[0-9]? \+ Math\.random\(\) \* 0\.[7-9]/.test(source),
+    'the particle field is still confined to a band')
   for (const selector of ['.tsl-track', '.tsl-seg']) {
     check(`${selector} recesses with an interactive fill, visible in light mode`,
       rule(selector).includes('--dsw-alias-interactive-bg-hover'), rule(selector).slice(0, 90))
